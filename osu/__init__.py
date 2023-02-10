@@ -1,0 +1,1 @@
+from osu.beatmap import Beatmap
