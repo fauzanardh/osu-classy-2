@@ -4,6 +4,7 @@ import datetime
 from pathlib import Path
 from enum import Enum, IntFlag
 from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 import numpy as np
 
@@ -54,9 +55,10 @@ class _unpacker:
             shift += 7
         return result
 
-    def unpack_string(self):
+    def unpack_string(self) -> Optional[str]:
         if self.replay_data[self.offset] == 0x0:
             self.offset += 1
+            return None
         elif self.replay_data[self.offset] == 0xB:
             self.offset += 1
             length = self.string_length()
@@ -74,14 +76,16 @@ class _unpacker:
         self.offset += struct.calcsize(specifier)
         return unpacked[0]
 
-    def unpack_timestamp(self):
+    def unpack_timestamp(self) -> datetime.datetime:
         ticks = self.unpack_once("q")
         timestamp = datetime.datetime.min + datetime.timedelta(microseconds=ticks / 10)
         timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
         return timestamp
 
     @staticmethod
-    def parse_replay_data(replay_data_str: str):
+    def parse_replay_data(
+        replay_data_str: str,
+    ) -> Tuple[Optional[int], List[ReplayEventOsu]]:
         replay_data_str = replay_data_str.rstrip(",")
         events = [event.split("|") for event in replay_data_str.split(",")]
 
@@ -100,22 +104,22 @@ class _unpacker:
             play_data.append(ReplayEventOsu(time_delta, x, y, Key(keys)))
         return rng_seed, play_data
 
-    def unpack_replay_data(self):
+    def unpack_replay_data(self) -> Tuple[Optional[int], List[ReplayEventOsu]]:
         length = self.unpack_once("i")
         data = self.replay_data[self.offset : self.offset + length]
         data = lzma.decompress(data, format=lzma.FORMAT_AUTO)
-        data = data.decode("ascii")
+        data_str = data.decode("ascii")
         self.offset += length
-        return self.parse_replay_data(data)
+        return self.parse_replay_data(data_str)
 
-    def unpack_replay_id(self):
+    def unpack_replay_id(self) -> int:
         try:
             replay_id = self.unpack_once("q")
         except struct.error:
             replay_id = self.unpack_once("l")
         return replay_id
 
-    def unpack_life_bar(self):
+    def unpack_life_bar(self) -> Optional[List[LifeBarState]]:
         lifebar = self.unpack_string()
         if not lifebar:
             return None
