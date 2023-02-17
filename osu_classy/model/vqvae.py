@@ -168,7 +168,7 @@ class ResBlock(nn.Module):
 
 
 class VQVAE(nn.Module):
-    def __init__(self, in_dim, h_dim, n_emb):
+    def __init__(self, in_dim, h_dim, out_dim, n_emb):
         super().__init__()
 
         self.encoder = nn.Sequential(
@@ -184,15 +184,16 @@ class VQVAE(nn.Module):
             ConvNextBlock(h_dim),
             ConvNextBlock(h_dim),
             nn.ReLU(),
-            nn.ConvTranspose1d(h_dim, h_dim, 2, stride=2, padding=0),
+            nn.ConvTranspose1d(h_dim, h_dim, 4, stride=2, padding=1),
             nn.BatchNorm1d(h_dim),
             nn.ReLU(),
-            nn.ConvTranspose1d(h_dim, in_dim, 2, stride=2, padding=0),
+            nn.ConvTranspose1d(h_dim, out_dim, 4, stride=2, padding=1),
             nn.Sigmoid(),
         )
         self.apply(init_weights)
 
-    def encode(self, x):
+    def encode(self, x, a):
+        x = torch.cat([x, a], dim=1)
         z_e_x = self.encoder(x)
         latents = self.codebook(z_e_x)
         return latents
@@ -202,7 +203,8 @@ class VQVAE(nn.Module):
         x_tilde = self.decoder(z_q_x)
         return x_tilde
 
-    def forward(self, x):
+    def forward(self, x, a):
+        x = torch.cat([x, a], dim=1)
         z_e_x = self.encoder(x)
         z_q_x_st, z_q_x = self.codebook.straight_through(z_e_x)
         x_tilde = self.decoder(z_q_x_st)

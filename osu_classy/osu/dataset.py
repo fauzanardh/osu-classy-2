@@ -6,8 +6,9 @@ from torch.utils.data import IterableDataset
 
 
 def load_tensor(map_file):
-    x = torch.tensor(np.load(map_file)).float()
-    return x
+    x = torch.tensor(np.load(map_file)["x"]).float()
+    a = torch.tensor(np.load(map_file.parent / "spec.npz")["spec"]).float()
+    return x, a
 
 
 class StreamPerSample(IterableDataset):
@@ -51,8 +52,8 @@ class FullSequenceDataset(StreamPerSample):
     MAX_LEN = 60000
 
     def sample_stream(self, map_file):
-        x = load_tensor(map_file)
-        yield x[..., : self.MAX_LEN]
+        x, a = load_tensor(map_file)
+        yield (x[..., : self.MAX_LEN], a[..., : self.MAX_LEN])
 
 
 class SubsequenceDataset(StreamPerSample):
@@ -76,7 +77,7 @@ class SubsequenceDataset(StreamPerSample):
         # self.approx_dataset_size = num_samples * self.subseq_density
 
     def sample_stream(self, map_file):
-        x = load_tensor(map_file)
+        x, a = load_tensor(map_file)
         n = x.shape[-1]
 
         if self.seq_len >= n:
@@ -84,4 +85,7 @@ class SubsequenceDataset(StreamPerSample):
 
         num_samples = int(n / self.seq_len * self.subseq_density)
         for idx in torch.randperm(n - self.seq_len)[:num_samples]:
-            yield x[..., idx : idx + self.seq_len].clone()
+            yield (
+                x[..., idx : idx + self.seq_len].clone(),
+                a[..., idx : idx + self.seq_len].clone(),
+            )

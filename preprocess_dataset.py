@@ -7,9 +7,11 @@ from tqdm.auto import tqdm
 from functools import partial
 from multiprocessing import Pool
 from audioread.ffdec import FFmpegAudioFile
-from osu_sr_calculator import calculateStarRating
 
-from osu import Beatmap, Circle, Slider, Spinner, Bezier, smooth_hit
+from osu_classy.osu.beatmap import Beatmap
+from osu_classy.osu.hit_objects import Circle, Slider, Spinner
+from osu_classy.osu.sliders import Bezier
+from osu_classy.utils.smooth_hit import smooth_hit
 
 
 N_FFT = 2048
@@ -22,7 +24,7 @@ N_MELS = 64
 
 def load_audio(audio_path):
     aro = FFmpegAudioFile(audio_path)
-    wave, _ = librosa.load(aro, sr=SR, res_type="fft")
+    wave, _ = librosa.load(aro, sr=SR)
     if wave.shape[0] == 0:
         raise ValueError("Empty audio file")
 
@@ -121,25 +123,25 @@ def prepare_map(data_dir, map_file):
         print(f"Skipping non-std map {map_file.name}")
         return
 
-    try:
-        star_ratings = calculateStarRating(
-            filepath=map_file,
-            returnAllDifficultyValues=True,
-        )
-    except Exception as e:
-        print(f"Failed to calculate SR for {map_file.name}: {e}")
-        return
+    # try:
+    #     star_ratings = calculateStarRating(
+    #         filepath=map_file,
+    #         returnAllDifficultyValues=True,
+    #     )
+    # except Exception as e:
+    #     print(f"Failed to calculate SR for {map_file.name}: {e}")
+    #     return
 
-    if star_ratings["nomod"]["total"] < 4.0:
-        print(f"Skipping easy map {map_file.name}")
-        return
+    # if star_ratings["nomod"]["total"] < 4.0:
+    #     print(f"Skipping easy map {map_file.name}")
+    #     return
 
     af_dir = "_".join(
         [bm.audio_filename.stem, *(s[1:] for s in bm.audio_filename.suffixes)]
     )
     map_dir = data_dir / map_file.parent.name / af_dir
-    spec_path = map_dir / "spec.npy"
-    map_path = map_dir / f"{map_file.stem}.map.npy"
+    spec_path = map_dir / "spec.npz"
+    map_path = map_dir / f"{map_file.stem}.map.npz"
 
     if map_path.exists():
         print(f"Skipping existing map {map_file.name}")
@@ -154,7 +156,7 @@ def prepare_map(data_dir, map_file):
     if spec_path.exists():
         for i in range(5):
             try:
-                spec = np.load(spec_path)
+                spec = np.load(spec_path)["spec"]
                 break
             except ValueError:
                 time.sleep(0.001 * 2**i)
@@ -169,7 +171,7 @@ def prepare_map(data_dir, map_file):
             return
 
         spec_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(spec_path, spec)
+        np.savez_compressed(spec_path, spec=spec)
 
     frame_times = (
         librosa.frames_to_time(
@@ -182,12 +184,12 @@ def prepare_map(data_dir, map_file):
     )
 
     x = from_beatmap(bm, frame_times)
-    np.save(map_path, x)
+    np.savez_compressed(map_path, x=x)
 
 
 if __name__ == "__main__":
     src_path = Path("/mnt/d/Games/osu!/Songs/")
-    dst_path = Path("data/beatmaps_v1/")
+    dst_path = Path("/mnt/d/Dataset/beatmaps_v1/")
 
     src_maps = list(src_path.glob("**/*.osu"))
     random.shuffle(src_maps)
