@@ -22,7 +22,10 @@ class Beatmap:
         self.artist = cfg["Metadata"]["Artist"]
         self.creator = cfg["Metadata"]["Creator"]
         self.version = cfg["Metadata"]["Version"]
-        self.mapset_id = int(cfg["Metadata"]["BeatmapSetID"])
+        try:
+            self.mapset_id = int(cfg["Metadata"]["BeatmapSetID"])
+        except KeyError:
+            self.mapset_id = None
 
         self.hp = float(cfg["Difficulty"]["HPDrainRate"])
         self.cs = float(cfg["Difficulty"]["CircleSize"])
