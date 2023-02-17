@@ -4,8 +4,8 @@ from pathlib import Path
 import bisect
 import numpy as np
 
-from osu.hit_objects import Timed, TimingPoint, Circle, Spinner, Slider
-from osu.sliders import from_control_points
+from osu_classy.osu.hit_objects import Timed, TimingPoint, Circle, Spinner, Slider
+from osu_classy.osu.sliders import from_control_points
 
 
 class Beatmap:

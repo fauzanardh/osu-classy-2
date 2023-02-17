@@ -3,7 +3,7 @@ from typing import List, Tuple
 import numpy as np
 import bezier
 
-from osu.hit_objects import Slider, NDIntArray
+from osu_classy.osu.hit_objects import Slider, NDIntArray
 
 
 def approx_eq(a, b):
