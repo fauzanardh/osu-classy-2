@@ -339,11 +339,11 @@ def to_beatmap(metadata, sig, frame_times, timing):
     # process hit signal
     sorted_hits = to_sorted_hits(hit_signal)
 
-    # process cursor signal
-    cursor_signal = to_playfield_coordinates(cursor_signal)
-
     # process slider signal
     slider_decoder = to_slider_decoder(frame_times, cursor_signal, slider_signal)
+
+    # process cursor signal
+    cursor_signal = to_playfield_coordinates(cursor_signal)
 
     # `timing` can be one of:
     # - List[TimingPoint] : timed according to timing points

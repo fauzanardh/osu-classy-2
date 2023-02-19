@@ -113,6 +113,44 @@ class Downsample(nn.Module):
         return x
 
 
+class Attention(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+
+        self.in_dim = in_dim
+        self.norm = nn.GroupNorm(1, in_dim)
+
+        self.q = nn.Conv1d(in_dim, in_dim, 1)
+        self.k = nn.Conv1d(in_dim, in_dim, 1)
+        self.v = nn.Conv1d(in_dim, in_dim, 1)
+
+        self.proj_out = nn.Conv1d(in_dim, in_dim, 1)
+
+    def forward(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        # compute attention
+        q = q.permute(0, 2, 1)  # BCL -> BLC
+        v = v.permute(0, 2, 1)  # BCL -> BLC
+
+        attn = torch.bmm(q, k)  # BLL
+        attn = attn / (int(self.in_dim) ** 0.5)
+        attn = F.softmax(attn, dim=-1)
+
+        # apply attention
+        h_ = torch.bmm(attn, v)
+        h_ = h_.permute(0, 2, 1)  # BLC -> BCL
+
+        h_ = self.proj_out(h_)
+        h_ = h_ + x
+
+        return h_
+
+
 class ResnetBlock(nn.Module):
     def __init__(self, in_dim, out_dim, dropout):
         super().__init__()
@@ -175,6 +213,8 @@ class Encoder(nn.Module):
 
             down = nn.Module()
             down.block = block
+            down.attn = Attention(block_out_dim)
+
             if i != len(dim_mult) - 1:
                 down.downsample = Downsample(block_out_dim)
 
@@ -183,6 +223,7 @@ class Encoder(nn.Module):
         # middle
         self.middle = nn.Sequential(
             ResnetBlock(block_in_dim, block_in_dim, dropout),
+            Attention(block_in_dim),
             ResnetBlock(block_in_dim, block_in_dim, dropout),
         )
 
@@ -198,6 +239,7 @@ class Encoder(nn.Module):
         for down in self.down:
             for block in down.block:
                 h = block(h)
+            h = down.attn(h)
             if hasattr(down, "downsample"):
                 h = down.downsample(h)
 
@@ -235,6 +277,7 @@ class Decoder(nn.Module):
         # middle
         self.middle = nn.Sequential(
             ResnetBlock(block_in_dim, block_in_dim, dropout),
+            Attention(block_in_dim),
             ResnetBlock(block_in_dim, block_in_dim, dropout),
         )
 
@@ -249,6 +292,7 @@ class Decoder(nn.Module):
 
             up = nn.Module()
             up.block = block
+            up.attn = Attention(block_out_dim)
             if i != 0:
                 up.upsample = Upsample(block_out_dim)
 
@@ -269,6 +313,7 @@ class Decoder(nn.Module):
         for up in self.up:
             for block in up.block:
                 h = block(h)
+            h = up.attn(h)
             if hasattr(up, "upsample"):
                 h = up.upsample(h)
 
@@ -276,7 +321,6 @@ class Decoder(nn.Module):
         h = self.norm(h)
         h = F.silu(h)
         h = self.conv_out(h)
-        h = torch.sigmoid(h)
         return h
 
 
@@ -310,6 +354,7 @@ class VQVAE(nn.Module):
     def forward(self, x, return_pred_indices=False):
         quantized, loss, (_, _, ind) = self.encode(x)
         decoded = self.decode(quantized)
+        decoded = torch.sigmoid(decoded)
         if return_pred_indices:
             return decoded, loss, ind
         return decoded, loss
