@@ -480,31 +480,35 @@ class VQVAE(nn.Module):
             attn_dim_head=attn_dim_head,
             dropout=dropout,
         )
-        self.quantize = VectorQuantizer(n_emb, emb_dim, beta=beta)
-        self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
-        self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
+        # self.quantize = VectorQuantizer(n_emb, emb_dim, beta=beta)
+        # self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
+        # self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
 
     def encode(self, x):
-        h = self.encoder(x)
-        h = self.quant_conv(h)
-        return self.quantize(h)
+        # h = self.encoder(x)
+        # h = self.quant_conv(h)
+        # return self.quantize(h)
+        return self.encoder(x)
 
-    def encode_to_prequant(self, x):
-        h = self.encoder(x)
-        return self.quant_conv(h)
+    # def encode_to_prequant(self, x):
+    #     h = self.encoder(x)
+    #     return self.quant_conv(h)
 
     def decode(self, quantized):
-        quantized = self.post_quant_conv(quantized)
+        # quantized = self.post_quant_conv(quantized)
+        # return self.decoder(quantized)
         return self.decoder(quantized)
 
-    def decode_code(self, codebook):
-        quantized_codebook = self.post_quant_conv(codebook)
-        return self.decoder(quantized_codebook)
+    # def decode_code(self, codebook):
+    #     quantized_codebook = self.post_quant_conv(codebook)
+    #     return self.decoder(quantized_codebook)
 
     def forward(self, x, return_pred_indices=False):
-        quantized, loss, (_, _, ind) = self.encode(x)
+        # quantized, loss, (_, _, ind) = self.encode(x)
+        quantized = self.encode(x)
         decoded = self.decode(quantized)
         decoded = torch.tanh(decoded)
-        if return_pred_indices:
-            return decoded, loss, ind
-        return decoded, loss
+        # if return_pred_indices:
+        #     return decoded, loss, ind
+        # return decoded, loss
+        return decoded
