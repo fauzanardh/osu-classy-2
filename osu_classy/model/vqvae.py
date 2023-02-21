@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from xformers.ops import memory_efficient_attention
 
 
 def init_weights(m):
@@ -92,6 +93,26 @@ class Downsample(nn.Module):
         return x
 
 
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.fn = fn
+        self.norm = nn.GroupNorm(1, dim)
+
+    def forward(self, x):
+        x = self.norm(x)
+        return self.fn(x)
+
+
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x, *args, **kwargs):
+        return self.fn(x, *args, *kwargs) + x
+
+
 class Attention(nn.Module):
     def __init__(self, in_dim, heads=8, dim_head=32):
         super().__init__()
@@ -122,6 +143,38 @@ class Attention(nn.Module):
         return out
 
 
+class LinearAttention(Attention):
+    def attn(self, q, k, v):
+        q = q.softmax(dim=-2) * self.scale
+        k = k.softmax(dim=-1)
+
+        ctx = torch.einsum("b h d n, b h e n -> b h d e", k, v)
+        out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q)
+        # b h c l -> b (h c) l
+        out = out.view(out.shape[0], -1, out.shape[-1])
+        return out
+
+
+class FlashAttention(Attention):
+    def attn(self, q, k, v):
+        out_dtype = q.dtype
+        # b h d n -> b h n d
+        q = q.permute(0, 3, 1, 2).contiguous()
+        k = k.permute(0, 3, 1, 2).contiguous()
+        v = v.permute(0, 3, 1, 2).contiguous()
+
+        # to fp16
+        q = q.half()
+        k = k.half()
+        v = v.half()
+        out = memory_efficient_attention(q, k, v, scale=self.scale)
+
+        # b h n d -> b (h d) n
+        out = out.permute(0, 2, 3, 1).contiguous()
+        out = out.view(out.shape[0], -1, out.shape[-1])
+        return out.to(out_dtype)
+
+
 class ResnetBlock(nn.Module):
     def __init__(self, in_dim, out_dim, dropout):
         super().__init__()
@@ -129,26 +182,22 @@ class ResnetBlock(nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-        self.norm1 = nn.GroupNorm(1, in_dim)
-        self.conv1 = nn.Conv1d(in_dim, out_dim, 7, padding=3)
-
-        self.norm2 = nn.GroupNorm(1, out_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv1d(out_dim, out_dim, 7, padding=3)
+        self.net = nn.Sequential(
+            nn.GroupNorm(1, in_dim),
+            nn.Conv1d(in_dim, out_dim, 7, padding=3),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.GroupNorm(1, out_dim),
+            nn.Conv1d(out_dim, out_dim, 7, padding=3),
+            nn.SiLU(),
+        )
 
         if self.in_dim != self.out_dim:
             self.shortcut = nn.Conv1d(in_dim, out_dim, 1)
 
     def forward(self, x):
         h = x
-        h = self.norm1(h)
-        h = F.silu(h)
-        h = self.conv1(h)
-
-        h = self.norm2(h)
-        h = F.silu(h)
-        h = self.dropout(h)
-        h = self.conv2(h)
+        h = self.net(h)
 
         if self.in_dim != self.out_dim:
             x = self.shortcut(x)
@@ -194,6 +243,8 @@ class Encoder(nn.Module):
         h_dim,
         z_dim,
         dim_mult=(1, 2, 4, 8),
+        use_flash_attn=False,
+        use_linear_attn=False,
         use_conv_next=False,
         num_res_blocks=2,
         attn_heads=8,
@@ -201,60 +252,87 @@ class Encoder(nn.Module):
         dropout=0.5,
     ):
         super().__init__()
-
-        in_dim_mult = (1,) + tuple(dim_mult)
         self.init_conv = nn.Conv1d(in_dim, h_dim, 7, padding=3)
 
+        assert not (use_flash_attn and use_linear_attn), "can't use both attn types"
+
         res_block = ConvNextBlock if use_conv_next else ResnetBlock
+        if use_flash_attn:
+            attn_block = FlashAttention
+        elif use_linear_attn:
+            attn_block = LinearAttention
+        else:
+            attn_block = Attention
+
+        h_dims = [h_dim * d for d in dim_mult]
+        in_out = list(zip(h_dims[:-1], h_dims[1:]))
+        num_layers = len(in_out)
 
         # down
-        self.down = nn.ModuleList()
-        for i in range(len(dim_mult)):
-            block = nn.ModuleList()
-            block_in_dim = h_dim * in_dim_mult[i]
-            block_out_dim = h_dim * dim_mult[i]
-            for _ in range(num_res_blocks):
-                block.append(res_block(block_in_dim, block_out_dim, dropout))
-                block_in_dim = block_out_dim
-
-            down = nn.Module()
-            down.block = block
-            down.attn = Attention(block_out_dim, attn_heads, attn_dim_head)
-
-            if i != len(dim_mult) - 1:
-                down.downsample = Downsample(block_out_dim)
-
-            self.down.append(down)
-
-        # middle
-        self.middle = nn.Sequential(
-            res_block(block_in_dim, block_in_dim, dropout),
-            Attention(block_in_dim, attn_heads, attn_dim_head),
-            res_block(block_in_dim, block_in_dim, dropout),
+        self.downs = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        nn.ModuleList(
+                            [
+                                res_block(
+                                    dim_in if i == 0 else dim_out, dim_out, dropout
+                                )
+                                for i in range(num_res_blocks)
+                            ]
+                        ),
+                        nn.ModuleList(
+                            [
+                                Residual(
+                                    PreNorm(
+                                        dim_out,
+                                        attn_block(dim_out, attn_heads, attn_dim_head),
+                                    )
+                                )
+                                for _ in range(num_res_blocks)
+                            ]
+                        ),
+                        Downsample(dim_out)
+                        if ind < (num_layers - 1)
+                        else nn.Identity(),
+                    ]
+                )
+                for ind, (dim_in, dim_out) in enumerate(in_out)
+            ]
         )
 
+        # middle
+        mid_dim = h_dims[-1]
+        self.mid_block1 = res_block(mid_dim, mid_dim, dropout)
+        self.mid_attn = Residual(
+            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
+        )
+        self.mid_block2 = res_block(mid_dim, mid_dim, dropout)
+
         # end
-        self.norm = nn.GroupNorm(1, block_in_dim)
-        self.conv_out = nn.Conv1d(block_in_dim, z_dim, 7, padding=3)
+        self.norm = nn.GroupNorm(1, mid_dim)
+        self.conv_out = nn.Conv1d(mid_dim, z_dim, 7, padding=3)
 
     def forward(self, x):
         # downsample
-        h = self.init_conv(x)
-        for down in self.down:
-            for block in down.block:
-                h = block(h)
-            h = down.attn(h)
-            if hasattr(down, "downsample"):
-                h = down.downsample(h)
+        x = self.init_conv(x)
+
+        for blocks, attns, downsample in self.downs:
+            for block, attn in zip(blocks, attns):
+                x = block(x)
+                x = attn(x)
+            x = downsample(x)
 
         # middle
-        h = self.middle(h)
+        x = self.mid_block1(x)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x)
 
         # end
-        h = self.norm(h)
-        h = F.silu(h)
-        h = self.conv_out(h)
-        return h
+        x = self.norm(x)
+        x = F.silu(x)
+        x = self.conv_out(x)
+        return x
 
 
 class Decoder(nn.Module):
@@ -264,6 +342,8 @@ class Decoder(nn.Module):
         h_dim,
         z_dim,
         dim_mult=(1, 2, 4, 8),
+        use_flash_attn=False,
+        use_linear_attn=False,
         use_conv_next=False,
         num_res_blocks=2,
         attn_heads=8,
@@ -272,70 +352,134 @@ class Decoder(nn.Module):
     ):
         super().__init__()
 
-        dim_mult = tuple(reversed(dim_mult))
-        in_dim_mult = tuple(reversed((1,) + tuple(dim_mult)))
-        block_in_dim = h_dim * in_dim_mult[0]
+        assert not (use_flash_attn and use_linear_attn), "can't use both attn types"
 
-        self.init_conv = nn.Conv1d(z_dim, block_in_dim, 7, padding=3)
+        dim_mult = tuple(reversed(dim_mult))
+        h_dims = [h_dim * d for d in dim_mult]
+        in_out = list(zip(h_dims[:-1], h_dims[1:]))
+        num_layers = len(in_out)
 
         res_block = ConvNextBlock if use_conv_next else ResnetBlock
+        if use_flash_attn:
+            attn_block = FlashAttention
+        elif use_linear_attn:
+            attn_block = LinearAttention
+        else:
+            attn_block = Attention
 
         # middle
-        self.middle = nn.Sequential(
-            res_block(block_in_dim, block_in_dim, dropout),
-            Attention(block_in_dim, attn_heads, attn_dim_head),
-            res_block(block_in_dim, block_in_dim, dropout),
+        mid_dim = h_dims[0]
+        self.init_conv = nn.Conv1d(z_dim, mid_dim, 7, padding=3)
+        self.mid_block1 = res_block(mid_dim, mid_dim, dropout)
+        self.mid_attn = Residual(
+            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
         )
+        self.mid_block2 = res_block(mid_dim, mid_dim, dropout)
 
         # up
-        self.up = nn.ModuleList()
-        for i in range(len(dim_mult)):
-            block = nn.ModuleList()
-            block_out_dim = h_dim * dim_mult[i]
-            for _ in range(num_res_blocks):
-                block.append(res_block(block_in_dim, block_out_dim, dropout))
-                block_in_dim = block_out_dim
-
-            up = nn.Module()
-            up.block = block
-            up.attn = Attention(block_out_dim, attn_heads, attn_dim_head)
-            if i != 0:
-                up.upsample = Upsample(block_out_dim)
-
-            self.up.append(up)
+        self.up = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        nn.ModuleList(
+                            [
+                                res_block(
+                                    dim_in if i == 0 else dim_out, dim_out, dropout
+                                )
+                                for i in range(num_res_blocks)
+                            ]
+                        ),
+                        nn.ModuleList(
+                            [
+                                Residual(
+                                    PreNorm(
+                                        dim_out,
+                                        attn_block(dim_out, attn_heads, attn_dim_head),
+                                    )
+                                )
+                                for _ in range(num_res_blocks)
+                            ]
+                        ),
+                        Upsample(dim_out) if ind < (num_layers - 1) else nn.Identity(),
+                    ]
+                )
+                for ind, (dim_in, dim_out) in enumerate(in_out)
+            ]
+        )
 
         # end
-        self.norm = nn.GroupNorm(1, block_in_dim)
-        self.conv_out = nn.Conv1d(block_in_dim, in_dim, 7, padding=3)
+        self.norm = nn.GroupNorm(1, h_dim)
+        self.conv_out = nn.Conv1d(h_dim, in_dim, 7, padding=3)
 
     def forward(self, x):
         # upsample
-        h = self.init_conv(x)
+        x = self.init_conv(x)
 
         # middle
-        h = self.middle(h)
+        x = self.mid_block1(x)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x)
 
         # upsample
-        for up in self.up:
-            for block in up.block:
-                h = block(h)
-            h = up.attn(h)
-            if hasattr(up, "upsample"):
-                h = up.upsample(h)
+        for blocks, attns, upsample in self.up:
+            for block, attn in zip(blocks, attns):
+                x = block(x)
+                x = attn(x)
+            x = upsample(x)
 
         # end
-        h = self.norm(h)
-        h = F.silu(h)
-        h = self.conv_out(h)
-        return h
+        x = self.norm(x)
+        x = F.silu(x)
+        x = self.conv_out(x)
+        return x
 
 
 class VQVAE(nn.Module):
-    def __init__(self, in_dim, h_dim, z_dim, n_emb, emb_dim, beta=0.25):
+    def __init__(
+        self,
+        in_dim,
+        h_dim,
+        z_dim,
+        n_emb,
+        emb_dim,
+        dim_mult=(1, 2, 4, 8),
+        use_flash_attn=False,
+        use_linear_attn=False,
+        use_conv_next=False,
+        num_res_blocks=2,
+        attn_heads=16,
+        attn_dim_head=16,
+        dropout=0.5,
+        beta=0.25,
+    ):
         super().__init__()
 
-        self.encoder = Encoder(in_dim, h_dim, z_dim)
-        self.decoder = Decoder(in_dim, h_dim, z_dim)
+        self.encoder = Encoder(
+            in_dim,
+            h_dim,
+            z_dim,
+            dim_mult=dim_mult,
+            use_flash_attn=use_flash_attn,
+            use_linear_attn=use_linear_attn,
+            use_conv_next=use_conv_next,
+            num_res_blocks=num_res_blocks,
+            attn_heads=attn_heads,
+            attn_dim_head=attn_dim_head,
+            dropout=dropout,
+        )
+        self.decoder = Decoder(
+            in_dim,
+            h_dim,
+            z_dim,
+            dim_mult=dim_mult,
+            use_flash_attn=use_flash_attn,
+            use_linear_attn=use_linear_attn,
+            use_conv_next=use_conv_next,
+            num_res_blocks=num_res_blocks,
+            attn_heads=attn_heads,
+            attn_dim_head=attn_dim_head,
+            dropout=dropout,
+        )
         self.quantize = VectorQuantizer(n_emb, emb_dim, beta=beta)
         self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
         self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
