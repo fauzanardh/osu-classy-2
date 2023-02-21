@@ -163,3 +163,4 @@ wandb/
 weights/
 data/
 *.ipynb
+*.osz
