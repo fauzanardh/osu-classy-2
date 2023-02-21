@@ -4,71 +4,6 @@ from torch.nn import functional as F
 from xformers.ops import memory_efficient_attention
 
 
-def init_weights(m):
-    class_name = m.__class__.__name__
-    if class_name.find("Conv") != -1:
-        try:
-            nn.init.xavier_uniform_(m.weight.data)
-            m.bias.data.fill_(0)
-        except AttributeError:
-            print(f"Skipping weights init for {class_name}")
-
-
-class VectorQuantizer(nn.Module):
-    def __init__(
-        self,
-        n_emb,
-        emb_dim,
-        beta,
-    ):
-        super().__init__()
-
-        self.n_emb = n_emb
-        self.emb_dim = emb_dim
-        self.beta = beta
-
-        self.embedding = nn.Embedding(self.n_emb, self.emb_dim)
-        self.embedding.weight.data.uniform_(-1 / self.n_emb, 1 / self.n_emb)
-
-        self.re_embed = n_emb
-
-    def forward(self, z):
-        # BCL -> BLC
-        z = z.permute(0, 2, 1).contiguous()
-        z_flatten = z.view(-1, self.emb_dim)
-
-        distances = (
-            torch.sum(z_flatten**2, dim=1, keepdim=True)
-            + torch.sum(self.embedding.weight**2, dim=1)
-            - 2 * torch.einsum("b d, d n -> b n", z_flatten, self.embedding.weight.t())
-        )
-
-        min_encoding_indices = torch.argmin(distances, dim=-1)
-        z_q = self.embedding(min_encoding_indices).view(z.shape)
-        perplexity = None
-        min_encodings = None
-
-        loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean(
-            (z_q - z.detach()) ** 2
-        )
-
-        z_q = z + (z_q - z).detach()
-
-        # BLC -> BCL
-        z_q = z_q.permute(0, 2, 1).contiguous()
-
-        return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
-
-    def get_codebook_entry(self, indices, shape):
-        z_q = self.embedding(indices)
-
-        if shape is not None:
-            z_q = z_q.view(shape)
-            z_q = z_q.permute(0, 2, 1).contiguous()
-
-        return z_q
-
-
 class Upsample(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
@@ -434,23 +369,20 @@ class Decoder(nn.Module):
         return x
 
 
-class VQVAE(nn.Module):
+class VAE(nn.Module):
     def __init__(
         self,
         in_dim,
         h_dim,
         z_dim,
-        n_emb,
-        emb_dim,
         dim_mult=(1, 2, 4, 8),
         use_flash_attn=False,
         use_linear_attn=False,
         use_conv_next=False,
-        num_res_blocks=2,
-        attn_heads=16,
-        attn_dim_head=16,
+        num_res_blocks=3,
+        attn_heads=8,
+        attn_dim_head=32,
         dropout=0.5,
-        beta=0.25,
     ):
         super().__init__()
 
@@ -480,35 +412,15 @@ class VQVAE(nn.Module):
             attn_dim_head=attn_dim_head,
             dropout=dropout,
         )
-        # self.quantize = VectorQuantizer(n_emb, emb_dim, beta=beta)
-        # self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
-        # self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
 
     def encode(self, x):
-        # h = self.encoder(x)
-        # h = self.quant_conv(h)
-        # return self.quantize(h)
         return self.encoder(x)
 
-    # def encode_to_prequant(self, x):
-    #     h = self.encoder(x)
-    #     return self.quant_conv(h)
-
     def decode(self, quantized):
-        # quantized = self.post_quant_conv(quantized)
-        # return self.decoder(quantized)
         return self.decoder(quantized)
 
-    # def decode_code(self, codebook):
-    #     quantized_codebook = self.post_quant_conv(codebook)
-    #     return self.decoder(quantized_codebook)
-
-    def forward(self, x, return_pred_indices=False):
-        # quantized, loss, (_, _, ind) = self.encode(x)
+    def forward(self, x):
         quantized = self.encode(x)
         decoded = self.decode(quantized)
         decoded = torch.tanh(decoded)
-        # if return_pred_indices:
-        #     return decoded, loss, ind
-        # return decoded, loss
         return decoded
