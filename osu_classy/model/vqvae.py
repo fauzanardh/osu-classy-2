@@ -3,6 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
 from xformers.ops import memory_efficient_attention
+from vector_quantize_pytorch import VectorQuantize
 
 
 def FeedForward(in_dim, mult):
@@ -379,55 +380,6 @@ class Decoder(nn.Module):
         return x
 
 
-class VQEmbedding(nn.Module):
-    def __init__(
-        self,
-        n_emb,
-        emb_dim,
-        beta=0.25,
-    ):
-        super().__init__()
-        self.n_emb = n_emb
-        self.emb_dim = emb_dim
-        self.beta = beta
-
-        self.emb = nn.Embedding(n_emb, emb_dim)
-        self.emb.weight.data.uniform_(-1 / n_emb, 1 / n_emb)
-
-    def forward(self, z):
-        z = rearrange(z, "b c l -> b l c")
-        z_flat = z.reshape(-1, self.emb_dim)
-
-        distances = (
-            torch.sum(z_flat**2, dim=1, keepdim=True)
-            + torch.sum(self.emb.weight**2, dim=1)
-            - 2 * torch.einsum("bd,dn->bn", z_flat, self.emb.weight.t())
-        )
-
-        encoding_indices = torch.argmin(distances, dim=-1)
-        z_q = self.emb(encoding_indices).view_as(z)
-        perplexity = None
-        encodings = None
-
-        loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean(
-            (z_q - z.detach()) ** 2
-        )
-
-        z_q = z + (z_q - z).detach()
-        z_q = rearrange(z_q, "b l c -> b c l")
-
-        return z_q, loss, (perplexity, encodings, encoding_indices)
-
-    def get_codebook_entry(self, indices, shape):
-        z_q = self.emb(indices)
-
-        if shape is not None:
-            z_q = z_q.view(shape)
-            z_q = rearrange(z_q, "b l c -> b c l")
-
-        return z_q
-
-
 class VQVAE(nn.Module):
     def __init__(
         self,
@@ -471,7 +423,12 @@ class VQVAE(nn.Module):
             attn_dim_head=attn_dim_head,
         )
 
-        self.vq = VQEmbedding(n_emb, emb_dim)
+        # self.vq = VQEmbedding(n_emb, emb_dim)
+        self.vq = VectorQuantize(
+            dim=emb_dim,
+            codebook_size=n_emb,
+            channel_last=False,
+        )
         self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
         self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
 
@@ -489,10 +446,10 @@ class VQVAE(nn.Module):
         return self.decoder(quantized)
 
     def forward(self, x, return_indices=False):
-        quantized, loss, (_, _, ind) = self.encode(x)
+        quantized, indices, commit_loss = self.encode(x)
         decoded = self.decode(quantized)
         decoded = torch.tanh(decoded)
         if return_indices:
-            return decoded, loss, ind
+            return decoded, commit_loss, indices
         else:
-            return decoded, loss
+            return decoded, commit_loss
