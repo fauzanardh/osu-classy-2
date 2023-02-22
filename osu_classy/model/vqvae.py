@@ -384,6 +384,7 @@ class VQVAE(nn.Module):
         num_res_blocks=3,
         attn_heads=8,
         attn_dim_head=32,
+        commitment_weight=0.1,
     ):
         super().__init__()
 
@@ -416,6 +417,7 @@ class VQVAE(nn.Module):
             dim=emb_dim,
             codebook_size=n_emb,
             channel_last=False,
+            commitment_weight=commitment_weight,
         )
         self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
         self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
