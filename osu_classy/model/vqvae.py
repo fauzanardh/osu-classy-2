@@ -121,11 +121,11 @@ class ResnetBlock(nn.Module):
 
         self.net = nn.Sequential(
             nn.GroupNorm(1, in_dim) if norm else nn.Identity(),
-            nn.SiLU(),
             nn.Conv1d(in_dim, out_dim, 7, padding=3),
-            nn.GroupNorm(1, out_dim) if norm else nn.Identity(),
             nn.SiLU(),
+            nn.GroupNorm(1, out_dim) if norm else nn.Identity(),
             nn.Conv1d(out_dim, out_dim, 7, padding=3),
+            nn.SiLU(),
         )
 
         if self.in_dim != self.out_dim:
@@ -412,7 +412,6 @@ class VQVAE(nn.Module):
             attn_dim_head=attn_dim_head,
         )
 
-        # self.vq = VQEmbedding(n_emb, emb_dim)
         self.vq = VectorQuantize(
             dim=emb_dim,
             codebook_size=n_emb,
