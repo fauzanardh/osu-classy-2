@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from einops import rearrange
 from xformers.ops import memory_efficient_attention
 
 
@@ -56,9 +57,8 @@ class Attention(nn.Module):
         attn = sim.softmax(dim=-1)
 
         out = torch.einsum("b h i j, b h d j -> b h i d", attn, v)
-        # b h l c -> b (h c) l
-        out = out.permute(0, 1, 3, 2).contiguous()
-        out = out.view(out.shape[0], -1, out.shape[-1])
+        # b h n d -> b (h d) n
+        out = rearrange(out, "b h n d -> b (h d) n")
         return out
 
     def forward(self, x):
@@ -76,17 +76,19 @@ class LinearAttention(Attention):
         ctx = torch.einsum("b h d n, b h e n -> b h d e", k, v)
         out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q)
         # b h c l -> b (h c) l
-        out = out.view(out.shape[0], -1, out.shape[-1])
+        # out = out.view(out.shape[0], -1, out.shape[-1])
+        # use rearrange from einops
+        out = rearrange(out, "b h c l -> b (h c) l")
         return out
 
 
 class FlashAttention(Attention):
     def attn(self, q, k, v):
         out_dtype = q.dtype
-        # b h d n -> b h n d
-        q = q.permute(0, 3, 1, 2).contiguous()
-        k = k.permute(0, 3, 1, 2).contiguous()
-        v = v.permute(0, 3, 1, 2).contiguous()
+        # b h d n -> b n h d
+        q = rearrange(q, "b h d n -> b n h d").contiguous()
+        k = rearrange(k, "b h d n -> b n h d").contiguous()
+        v = rearrange(v, "b h d n -> b n h d").contiguous()
 
         # to fp16
         q = q.half()
@@ -94,9 +96,8 @@ class FlashAttention(Attention):
         v = v.half()
         out = memory_efficient_attention(q, k, v, scale=self.scale)
 
-        # b h n d -> b (h d) n
-        out = out.permute(0, 2, 3, 1).contiguous()
-        out = out.view(out.shape[0], -1, out.shape[-1])
+        # b n h d -> b (h d) n
+        out = rearrange(out, "b n h d -> b (h d) n")
         return out.to(out_dtype)
 
 
@@ -378,12 +379,63 @@ class Decoder(nn.Module):
         return x
 
 
-class VAE(nn.Module):
+class VQEmbedding(nn.Module):
+    def __init__(
+        self,
+        n_emb,
+        emb_dim,
+        beta=0.25,
+    ):
+        super().__init__()
+        self.n_emb = n_emb
+        self.emb_dim = emb_dim
+        self.beta = beta
+
+        self.emb = nn.Embedding(n_emb, emb_dim)
+        self.emb.weight.data.uniform_(-1 / n_emb, 1 / n_emb)
+
+    def forward(self, z):
+        z = rearrange(z, "b c l -> b l c")
+        z_flat = z.reshape(-1, self.emb_dim)
+
+        distances = (
+            torch.sum(z_flat**2, dim=1, keepdim=True)
+            + torch.sum(self.emb.weight**2, dim=1)
+            - 2 * torch.einsum("bd,dn->bn", z_flat, self.emb.weight.t())
+        )
+
+        encoding_indices = torch.argmin(distances, dim=-1)
+        z_q = self.emb(encoding_indices).view_as(z)
+        perplexity = None
+        encodings = None
+
+        loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean(
+            (z_q - z.detach()) ** 2
+        )
+
+        z_q = z + (z_q - z).detach()
+        z_q = rearrange(z_q, "b l c -> b c l")
+
+        return z_q, loss, (perplexity, encodings, encoding_indices)
+
+    def get_codebook_entry(self, indices, shape):
+        z_q = self.emb(indices)
+
+        if shape is not None:
+            z_q = z_q.view(shape)
+            z_q = rearrange(z_q, "b l c -> b c l")
+
+        return z_q
+
+
+class VQVAE(nn.Module):
     def __init__(
         self,
         in_dim,
         h_dim,
         z_dim,
+        n_emb,
+        emb_dim,
         dim_mult=(1, 2, 4, 8),
         use_flash_attn=False,
         use_linear_attn=False,
@@ -419,14 +471,28 @@ class VAE(nn.Module):
             attn_dim_head=attn_dim_head,
         )
 
+        self.vq = VQEmbedding(n_emb, emb_dim)
+        self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
+        self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
+
     def encode(self, x):
-        return self.encoder(x)
+        h = self.encoder(x)
+        h = self.quant_conv(h)
+        return self.vq(h)
 
-    def decode(self, encoded):
-        return self.decoder(encoded)
+    def encode_to_prequant(self, x):
+        h = self.encoder(x)
+        return self.quant_conv(h)
 
-    def forward(self, x):
-        encoded = self.encode(x)
-        decoded = self.decode(encoded)
+    def decode(self, quantized):
+        quantized = self.post_quant_conv(quantized)
+        return self.decoder(quantized)
+
+    def forward(self, x, return_indices=False):
+        quantized, loss, (_, _, ind) = self.encode(x)
+        decoded = self.decode(quantized)
         decoded = torch.tanh(decoded)
-        return decoded
+        if return_indices:
+            return decoded, loss, ind
+        else:
+            return decoded, loss
