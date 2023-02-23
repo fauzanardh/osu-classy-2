@@ -107,7 +107,7 @@ class FlashAttention(Attention):
 
 
 class ResnetBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, norm=True):
+    def __init__(self, in_dim, out_dim, dropout=0.5, norm=True):
         super().__init__()
 
         self.in_dim = in_dim
@@ -117,6 +117,7 @@ class ResnetBlock(nn.Module):
             nn.GroupNorm(1, in_dim) if norm else nn.Identity(),
             nn.Conv1d(in_dim, out_dim, 7, padding=3),
             nn.SiLU(),
+            nn.Dropout(dropout),
             nn.GroupNorm(1, out_dim) if norm else nn.Identity(),
             nn.Conv1d(out_dim, out_dim, 7, padding=3),
             nn.SiLU(),
@@ -136,7 +137,7 @@ class ResnetBlock(nn.Module):
 
 
 class ConvNextBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, mult=2):
+    def __init__(self, in_dim, out_dim, dropout=0.5, mult=2):
         super().__init__()
 
         self.in_dim = in_dim
@@ -149,6 +150,7 @@ class ConvNextBlock(nn.Module):
             nn.GroupNorm(1, in_dim),
             nn.Conv1d(in_dim, out_dim * mult, 7, padding=3, padding_mode="reflect"),
             nn.SiLU(),
+            nn.Dropout(dropout),
             nn.GroupNorm(1, out_dim * mult),
             nn.Conv1d(out_dim * mult, out_dim, 7, padding=3, padding_mode="reflect"),
         )
@@ -175,9 +177,11 @@ class Encoder(nn.Module):
         use_flash_attn=False,
         use_linear_attn=False,
         use_conv_next=False,
-        num_res_blocks=2,
+        num_res_blocks=3,
+        attn_depth=2,
         attn_heads=8,
         attn_dim_head=32,
+        dropout=0.5,
     ):
         super().__init__()
         self.init_conv = nn.Conv1d(in_dim, h_dim, 7, padding=3)
@@ -206,6 +210,7 @@ class Encoder(nn.Module):
                                 res_block(
                                     dim_in if i == 0 else dim_out,
                                     dim_out,
+                                    dropout=dropout,
                                 )
                                 for i in range(num_res_blocks)
                             ]
@@ -218,7 +223,7 @@ class Encoder(nn.Module):
                                         attn_block(dim_out, attn_heads, attn_dim_head),
                                     )
                                 )
-                                for _ in range(num_res_blocks)
+                                for _ in range(attn_depth)
                             ]
                         ),
                         Downsample(dim_out)
@@ -232,11 +237,11 @@ class Encoder(nn.Module):
 
         # middle
         mid_dim = h_dims[-1]
-        self.mid_block1 = res_block(mid_dim, mid_dim)
+        self.mid_block1 = res_block(mid_dim, mid_dim, dropout=dropout)
         self.mid_attn = Residual(
             PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
         )
-        self.mid_block2 = res_block(mid_dim, mid_dim)
+        self.mid_block2 = res_block(mid_dim, mid_dim, dropout=dropout)
 
         # end
         self.norm = nn.GroupNorm(1, mid_dim)
@@ -274,9 +279,11 @@ class Decoder(nn.Module):
         use_flash_attn=False,
         use_linear_attn=False,
         use_conv_next=False,
-        num_res_blocks=2,
+        num_res_blocks=3,
+        attn_depth=2,
         attn_heads=8,
         attn_dim_head=32,
+        dropout=0.5,
     ):
         super().__init__()
 
@@ -298,11 +305,11 @@ class Decoder(nn.Module):
         # middle
         mid_dim = h_dims[0]
         self.init_conv = nn.Conv1d(z_dim, mid_dim, 7, padding=3)
-        self.mid_block1 = res_block(mid_dim, mid_dim)
+        self.mid_block1 = res_block(mid_dim, mid_dim, dropout=dropout)
         self.mid_attn = Residual(
             PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
         )
-        self.mid_block2 = res_block(mid_dim, mid_dim)
+        self.mid_block2 = res_block(mid_dim, mid_dim, dropout=dropout)
 
         # up
         self.up = nn.ModuleList(
@@ -314,6 +321,7 @@ class Decoder(nn.Module):
                                 res_block(
                                     dim_in if i == 0 else dim_out,
                                     dim_out,
+                                    dropout=dropout,
                                 )
                                 for i in range(num_res_blocks)
                             ]
@@ -326,7 +334,7 @@ class Decoder(nn.Module):
                                         attn_block(dim_out, attn_heads, attn_dim_head),
                                     )
                                 )
-                                for _ in range(num_res_blocks)
+                                for _ in range(attn_depth)
                             ]
                         ),
                         Upsample(dim_out) if ind < (num_layers - 1) else nn.Identity(),
@@ -376,9 +384,11 @@ class VQVAE(nn.Module):
         use_linear_attn=False,
         use_conv_next=False,
         num_res_blocks=3,
+        attn_depth=2,
         attn_heads=8,
         attn_dim_head=32,
-        commitment_weight=0.1,
+        commitment_weight=0.25,
+        dropout=0.5,
     ):
         super().__init__()
 
@@ -391,8 +401,10 @@ class VQVAE(nn.Module):
             use_linear_attn=use_linear_attn,
             use_conv_next=use_conv_next,
             num_res_blocks=num_res_blocks,
+            attn_depth=attn_depth,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
+            dropout=dropout,
         )
         self.decoder = Decoder(
             in_dim,
@@ -403,8 +415,10 @@ class VQVAE(nn.Module):
             use_linear_attn=use_linear_attn,
             use_conv_next=use_conv_next,
             num_res_blocks=num_res_blocks,
+            attn_depth=attn_depth,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
+            dropout=dropout,
         )
 
         self.vq = VectorQuantize(
@@ -421,10 +435,6 @@ class VQVAE(nn.Module):
         h = self.quant_conv(h)
         return self.vq(h)
 
-    def encode_to_prequant(self, x):
-        h = self.encoder(x)
-        return self.quant_conv(h)
-
     def decode(self, quantized):
         quantized = self.post_quant_conv(quantized)
         return self.decoder(quantized)
@@ -432,7 +442,6 @@ class VQVAE(nn.Module):
     def forward(self, x, return_indices=False):
         quantized, indices, commit_loss = self.encode(x)
         decoded = self.decode(quantized)
-        decoded = torch.tanh(decoded)
         if return_indices:
             return decoded, commit_loss, indices
         else:
