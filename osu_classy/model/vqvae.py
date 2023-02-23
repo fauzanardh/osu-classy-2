@@ -68,7 +68,6 @@ class Attention(nn.Module):
         attn = sim.softmax(dim=-1)
 
         out = torch.einsum("b h i j, b h d j -> b h i d", attn, v)
-        # b h n d -> b (h d) n
         out = rearrange(out, "b h n d -> b (h d) n")
         return out
 
@@ -86,9 +85,6 @@ class LinearAttention(Attention):
 
         ctx = torch.einsum("b h d n, b h e n -> b h d e", k, v)
         out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q)
-        # b h c l -> b (h c) l
-        # out = out.view(out.shape[0], -1, out.shape[-1])
-        # use rearrange from einops
         out = rearrange(out, "b h c l -> b (h c) l")
         return out
 
@@ -96,7 +92,6 @@ class LinearAttention(Attention):
 class FlashAttention(Attention):
     def attn(self, q, k, v):
         out_dtype = q.dtype
-        # b h d n -> b n h d
         q = rearrange(q, "b h d n -> b n h d").contiguous()
         k = rearrange(k, "b h d n -> b n h d").contiguous()
         v = rearrange(v, "b h d n -> b n h d").contiguous()
@@ -107,7 +102,6 @@ class FlashAttention(Attention):
         v = v.half()
         out = memory_efficient_attention(q, k, v, scale=self.scale)
 
-        # b n h d -> b (h d) n
         out = rearrange(out, "b n h d -> b (h d) n")
         return out.to(out_dtype)
 
