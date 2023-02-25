@@ -105,7 +105,7 @@ class FlashAttention(Attention):
         out = rearrange(out, "b n h d -> b (h d) n")
         return out.to(out_dtype)
 
-
+ 
 class ResnetBlock(nn.Module):
     def __init__(self, in_dim, out_dim, norm=True):
         super().__init__()
@@ -418,8 +418,8 @@ class VQVAE(nn.Module):
             channel_last=False,
             commitment_weight=commitment_weight,
         )
-        self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1)
-        self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1)
+        self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1) if emb_dim != z_dim else nn.Identity()
+        self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
 
     def encode(self, x):
         h = self.encoder(x)
