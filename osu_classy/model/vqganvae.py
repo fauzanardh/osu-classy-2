@@ -10,6 +10,18 @@ def l2norm(t):
     return F.normalize(t, dim=-1)
 
 
+def log(t, eps=1e-10):
+    return torch.log(t + eps)
+
+
+def bce_discriminator_loss(fake, real):
+    return (-log(1 - torch.sigmoid(fake)) - log(torch.sigmoid(real))).mean()
+
+
+def bce_generator_loss(fake):
+    return -log(torch.sigmoid(fake)).mean()
+
+
 class SwiGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=1)
@@ -85,9 +97,13 @@ class Attention(nn.Module):
         self.to_out = nn.Conv1d(h_dim, in_dim, 1)
 
     def attn(self, q, k, v):
+        q = rearrange(q, "b h d n -> b n h d")
+        k = rearrange(k, "b h d n -> b n h d")
         q, k = map(l2norm, (q, k))
         q = q * self.q_scale
         k = k * self.k_scale
+        q = rearrange(q, "b n h d -> b h d n")
+        k = rearrange(k, "b n h d -> b h d n")
         sim = torch.einsum("b h d i, b h d j -> b h i j", q, k) * self.scale
         sim = sim - sim.amax(dim=-1, keepdim=True).detach()
         attn = sim.softmax(dim=-1)
@@ -105,9 +121,13 @@ class Attention(nn.Module):
 
 class LinearAttention(Attention):
     def attn(self, q, k, v):
+        q = rearrange(q, "b h d n -> b n h d")
+        k = rearrange(k, "b h d n -> b n h d")
         q, k = map(l2norm, (q, k))
         q = q * self.q_scale
         k = k * self.k_scale
+        q = rearrange(q, "b n h d -> b h d n")
+        k = rearrange(k, "b n h d -> b h d n")
 
         q = q.softmax(dim=-2)
         k = k.softmax(dim=-1)
@@ -120,14 +140,14 @@ class LinearAttention(Attention):
 
 class FlashAttention(Attention):
     def attn(self, q, k, v):
+        q = rearrange(q, "b h d n -> b n h d").contiguous()
+        k = rearrange(k, "b h d n -> b n h d").contiguous()
+        v = rearrange(v, "b h d n -> b n h d").contiguous()
         q, k = map(l2norm, (q, k))
         q = q * self.q_scale
         k = k * self.k_scale
 
         out_dtype = q.dtype
-        q = rearrange(q, "b h d n -> b n h d").contiguous()
-        k = rearrange(k, "b h d n -> b n h d").contiguous()
-        v = rearrange(v, "b h d n -> b n h d").contiguous()
 
         # to fp16
         q = q.half()
@@ -241,6 +261,44 @@ class ConvNextBlock(nn.Module):
             x = self.shortcut(x)
 
         return x + h
+
+
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        dims,
+        channels=8,
+    ):
+        super().__init__()
+        dim_pairs = list(zip(dims[:-1], dims[1:]))
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv1d(channels, dims[0], 7, padding=3),
+                    nn.SiLU(),
+                ),
+            ]
+        )
+
+        for in_dim, out_dim in dim_pairs:
+            self.layers.append(
+                nn.Sequential(
+                    nn.Conv1d(in_dim, out_dim, 7, padding=3),
+                    nn.SiLU(),
+                )
+            )
+
+        dim = dims[-1]
+        self.to_logits = nn.Sequential(
+            nn.Conv1d(dim, dim, 1),
+            nn.SiLU(),
+            nn.Conv1d(dim, 1, 1),
+        )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.to_logits(x)
 
 
 class Encoder(nn.Module):
@@ -441,7 +499,7 @@ class Decoder(nn.Module):
         return torch.tanh(x)
 
 
-class VQVAE(nn.Module):
+class VQGANVAE(nn.Module):
     def __init__(
         self,
         in_dim,
@@ -458,6 +516,7 @@ class VQVAE(nn.Module):
         attn_heads=8,
         attn_dim_head=32,
         commitment_weight=0.25,
+        discriminator_layers=4,
     ):
         super().__init__()
 
@@ -491,8 +550,10 @@ class VQVAE(nn.Module):
         self.vq = VectorQuantize(
             dim=emb_dim,
             codebook_size=n_emb,
-            channel_last=False,
             commitment_weight=commitment_weight,
+            kmeans_init=True,
+            channel_last=False,
+            use_cosine_sim=True,
         )
         self.quant_conv = (
             nn.Conv1d(z_dim, emb_dim, 1) if emb_dim != z_dim else nn.Identity()
@@ -501,19 +562,45 @@ class VQVAE(nn.Module):
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
 
-    def encode(self, x):
-        h = self.encoder(x)
-        h = self.quant_conv(h)
-        return self.vq(h)
+        layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
+        layer_dims = [h_dim * m for m in layer_mults]
+        self.discriminator = Discriminator(
+            layer_dims,
+            in_dim,
+        )
+        self.discriminator_loss = bce_discriminator_loss
+        self.generator_loss = bce_generator_loss
+
+    @property
+    def codebook(self):
+        return self.vq.codebook
+
+    def encode(self, fmap):
+        fmap = self.encoder(fmap)
+        fmap = self.quant_conv(fmap)
+        return self.vq(fmap)
 
     def decode(self, quantized):
         quantized = self.post_quant_conv(quantized)
         return self.decoder(quantized)
 
+    def decode_from_ids(self, ids):
+        codes = self.codebook[ids]
+        fmap = self.vq.project_out(codes)
+        fmap = rearrange(fmap, "b l c -> b c l")
+        return self.decode(fmap)
+
     def forward(self, x, return_indices=False):
-        quantized, indices, commit_loss = self.encode(x)
-        decoded = self.decode(quantized)
+        fmap, indices, commit_loss = self.encode(x)
+        fmap = self.decode(fmap)
+        fmap.detach_()
+        x.requires_grad_()
+
+        recon_loss = F.mse_loss(fmap, x)
+        gen_loss = self.generator_loss(self.discriminator(fmap))
+
+        loss = recon_loss + commit_loss + gen_loss
         if return_indices:
-            return decoded, commit_loss, indices
+            return fmap, loss, indices
         else:
-            return decoded, commit_loss
+            return fmap, loss
