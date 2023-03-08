@@ -84,12 +84,10 @@ class Downsample(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, in_dim, heads=8, dim_head=64, scale=8):
+    def __init__(self, in_dim, heads=8, dim_head=64):
         super().__init__()
         self.heads = heads
-        self.scale = scale
-        self.q_scale = nn.Parameter(torch.ones(dim_head))
-        self.k_scale = nn.Parameter(torch.ones(dim_head))
+        self.scale = dim_head ** -0.5
 
         h_dim = dim_head * heads
         self.dim_head = dim_head
@@ -97,13 +95,6 @@ class Attention(nn.Module):
         self.to_out = nn.Conv1d(h_dim, in_dim, 1)
 
     def attn(self, q, k, v):
-        q = rearrange(q, "b h d n -> b n h d")
-        k = rearrange(k, "b h d n -> b n h d")
-        q, k = map(l2norm, (q, k))
-        q = q * self.q_scale
-        k = k * self.k_scale
-        q = rearrange(q, "b n h d -> b h d n")
-        k = rearrange(k, "b n h d -> b h d n")
         sim = torch.einsum("b h d i, b h d j -> b h i j", q, k) * self.scale
         sim = sim - sim.amax(dim=-1, keepdim=True).detach()
         attn = sim.softmax(dim=-1)
@@ -121,13 +112,6 @@ class Attention(nn.Module):
 
 class LinearAttention(Attention):
     def attn(self, q, k, v):
-        q = rearrange(q, "b h d n -> b n h d")
-        k = rearrange(k, "b h d n -> b n h d")
-        q, k = map(l2norm, (q, k))
-        q = q * self.q_scale
-        k = k * self.k_scale
-        q = rearrange(q, "b n h d -> b h d n")
-        k = rearrange(k, "b n h d -> b h d n")
 
         q = q.softmax(dim=-2)
         k = k.softmax(dim=-1)
@@ -140,14 +124,10 @@ class LinearAttention(Attention):
 
 class FlashAttention(Attention):
     def attn(self, q, k, v):
+        out_dtype = q.dtype
         q = rearrange(q, "b h d n -> b n h d").contiguous()
         k = rearrange(k, "b h d n -> b n h d").contiguous()
         v = rearrange(v, "b h d n -> b n h d").contiguous()
-        q, k = map(l2norm, (q, k))
-        q = q * self.q_scale
-        k = k * self.k_scale
-
-        out_dtype = q.dtype
 
         # to fp16
         q = q.half()
