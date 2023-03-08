@@ -28,7 +28,7 @@ Tags: osu_vqvae
 
 [Difficulty]
 HPDrainRate: 0
-CircleSize: 3
+CircleSize: 4
 OverallDifficulty: 0
 ApproachRate: 9.5
 SliderMultiplier: 1
@@ -102,7 +102,7 @@ def to_playfield_coordinates(cursor_signal):
     # pad so that the cursor isn't too close to the edges of the screen
     # padding = 0.
     # cursor_signal = padding + cursor_signal * (1 - 2*padding)
-    return cursor_signal * np.array([[512], [384]])
+    return (cursor_signal + 1) / 2 * np.array([[512], [384]])
 
 
 def to_slider_decoder(frame_times, cursor_signal, slider_signal):
@@ -114,21 +114,26 @@ def to_slider_decoder(frame_times, cursor_signal, slider_signal):
     """
     repeat_sig, seg_boundary_sig = slider_signal
 
-    repeat_idxs = np.zeros_like(frame_times)
-    repeat_idxs[decode_hit(repeat_sig)] = 1
+    repeat_idxs = decode_hit(repeat_sig)
     seg_boundary_idxs = decode_hit(seg_boundary_sig)
 
     def decoder(a, b):
-        slides = int(sum(repeat_idxs[a : b + 1]) + 1)
+        repeat_idx_in_range = [r for r in repeat_idxs if a < r < b]
+        if len(repeat_idx_in_range) == 0:
+            slides = 1
+        else:
+            r = repeat_idx_in_range[0]
+            slides = round((b - a) / (r - a))
+
+        r = round(a + (b - a) / slides)
         ctrl_pts = []
         length = 0
-        sb_idxs = [s for s in seg_boundary_idxs if a < s < b]
-        for seg_start, seg_end in zip([a] + sb_idxs, sb_idxs + [b]):
+        sb_idxs = [s for s in seg_boundary_idxs if a < s < r]
+        for seg_start, seg_end in zip([a] + sb_idxs, sb_idxs + [r]):
             for b in fit_bezier(cursor_signal.T[seg_start : seg_end + 1], max_err=100):
                 b = np.array(b).round().astype(int)
                 ctrl_pts.extend(b)
                 length += bezier.Curve.from_nodes(b.T).length
-
         return length, slides, ctrl_pts
 
     return decoder
@@ -138,7 +143,6 @@ def to_beatmap(metadata, sig, frame_times, timing):
     """
     returns the beatmap as the string contents of the beatmap file
     """
-    sig = (sig + 1) / 2  # [-1, 1] => [0, 1]
 
     hit_signal, sig = np.split(sig, (4,))
     slider_signal, sig = np.split(sig, (2,))
@@ -172,7 +176,7 @@ def to_beatmap(metadata, sig, frame_times, timing):
         # x = np.linspace(0,20,1000)
         # timing_beat_len = np.exp(x[diff_dist(x).argmax()])
 
-        beat_snap, timing_points = False, [TimingPoint(0, 1000, None, 4, None)]
+        beat_snap, timing_points = False, [TimingPoint(0, 60000 / 200, None, 4, None)]
     elif isinstance(timing, (int, float)):
         timing_beat_len = 60.0 * 1000.0 / float(timing)
         # compute timing offset
@@ -223,6 +227,11 @@ def to_beatmap(metadata, sig, frame_times, timing):
             return add_hit_circle(i, j, t, u, new_combo)
 
         SV = length * slides / (u - t) / base_slider_vel
+        if SV > 10 or SV < 0.1:
+            print(
+                "warning: SV > 10 or SV < .1 not supported, will result in bad sliders:",
+                SV,
+            )
 
         x1, y1 = ctrl_pts[0]
         curve_pts = "|".join(f"{x}:{y}" for x, y in ctrl_pts[1:])

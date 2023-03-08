@@ -1,48 +1,50 @@
-from typing import Union, Tuple
-
-import scipy
 import numpy as np
+import scipy
+
+# std dev of impulse indicating a hit
+HIT_SD = 3
 
 
-HIT_SD = 5
+def sigmoid(x):
+    """1/(e^-x + 1)"""
+    return np.exp(-np.logaddexp(-x, 0))
 
 
-def smooth_hit(
-    x: np.ndarray, mu: Union[float, Tuple[float, float]], sigma: float = HIT_SD
-):
-    """Smooths a hit with a normal distribution"""
-    if isinstance(mu, float):
-        z = (x - mu) / sigma
-    elif isinstance(mu, tuple):
-        a, b = mu
-        z = np.where(x < a, x - a, np.where(x < b, 0, x - b)) / sigma
-    else:
-        raise TypeError("mu must be a float or a tuple of two floats")
+def encode_hit(sig, frame_times, i):
+    z = (frame_times - i) / HIT_SD
 
-    return np.exp(-0.5 * z**2)
+    # hits are impulses
+    # sig += 2 * np.exp(-.5 * z**2)
+
+    # hits are flips
+    sig *= 1 - 2 * sigmoid(z)
 
 
-f_b = max(2, HIT_SD * 6)
-feat = smooth_hit(np.arange(-f_b, f_b + 1), float(0))
+def encode_hold(sig, frame_times, i, j):
+    m = 2 * sigmoid((j - i) / 2 / HIT_SD) - 1  # maximum value at (j-i)/2
+    sig += (
+        2
+        * (sigmoid((frame_times - i) / HIT_SD) - sigmoid((frame_times - j) / HIT_SD))
+        / m
+    )
 
 
-def _decode(sig, peak_h, hit_offset):
-    corr = scipy.signal.correlate(sig, feat, mode="same")
-    hit_peaks = scipy.signal.find_peaks(corr, height=peak_h)[0] + hit_offset
-    return hit_peaks.astype(int).tolist()
+def flips(sig):
+    sig_grad = np.gradient(sig)
+    return (
+        scipy.signal.find_peaks(sig_grad, height=0.5)[0].astype(int),
+        scipy.signal.find_peaks(-sig_grad, height=0.5)[0].astype(int),
+    )
 
 
 def decode_hit(sig):
-    return _decode(sig, peak_h=0.5, hit_offset=0)
+    rising, falling = flips(sig)
+    return sorted([*rising, *falling])
 
 
 def decode_hold(sig):
-    sig_grad = np.gradient(sig)
-    start_sig = np.maximum(0, sig_grad)
-    end_sig = -np.minimum(0, sig_grad)
-
-    start_idxs = _decode(start_sig, peak_h=0.25, hit_offset=1)
-    end_idxs = _decode(end_sig, peak_h=0.25, hit_offset=-1)
+    rising, falling = flips(sig)
+    start_idxs, end_idxs = list(rising), list(falling)
 
     # ensure that first start is before first end
     while len(start_idxs) and len(end_idxs) and start_idxs[0] >= end_idxs[0]:
