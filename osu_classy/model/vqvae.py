@@ -6,6 +6,10 @@ from xformers.ops import memory_efficient_attention
 from vector_quantize_pytorch import VectorQuantize
 
 
+def l2norm(t):
+    return F.normalize(t, dim=-1)
+
+
 class SwiGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=1)
@@ -68,18 +72,23 @@ class Downsample(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, in_dim, heads=8, dim_head=32):
+    def __init__(self, in_dim, heads=8, dim_head=64, scale=8):
         super().__init__()
-        self.scale = dim_head**-0.5
         self.heads = heads
+        self.scale = scale
+        self.q_scale = nn.Parameter(torch.ones(dim_head))
+        self.k_scale = nn.Parameter(torch.ones(dim_head))
+
         h_dim = dim_head * heads
         self.dim_head = dim_head
         self.to_qkv = nn.Conv1d(in_dim, h_dim * 3, 1, bias=False)
         self.to_out = nn.Conv1d(h_dim, in_dim, 1)
 
     def attn(self, q, k, v):
-        q = q * self.scale
-        sim = torch.einsum("b h d i, b h d j -> b h i j", q, k)
+        q, k = map(l2norm, (q, k))
+        q = q * self.q_scale
+        k = k * self.k_scale
+        sim = torch.einsum("b h d i, b h d j -> b h i j", q, k) * self.scale
         sim = sim - sim.amax(dim=-1, keepdim=True).detach()
         attn = sim.softmax(dim=-1)
 
@@ -96,17 +105,25 @@ class Attention(nn.Module):
 
 class LinearAttention(Attention):
     def attn(self, q, k, v):
-        q = q.softmax(dim=-2) * self.scale
+        q, k = map(l2norm, (q, k))
+        q = q * self.q_scale
+        k = k * self.k_scale
+
+        q = q.softmax(dim=-2)
         k = k.softmax(dim=-1)
 
         ctx = torch.einsum("b h d n, b h e n -> b h d e", k, v)
-        out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q)
+        out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q) * self.scale
         out = rearrange(out, "b h c l -> b (h c) l")
         return out
 
 
 class FlashAttention(Attention):
     def attn(self, q, k, v):
+        q, k = map(l2norm, (q, k))
+        q = q * self.q_scale
+        k = k * self.k_scale
+
         out_dtype = q.dtype
         q = rearrange(q, "b h d n -> b n h d").contiguous()
         k = rearrange(k, "b h d n -> b n h d").contiguous()
