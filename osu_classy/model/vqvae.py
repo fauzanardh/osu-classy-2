@@ -6,6 +6,23 @@ from xformers.ops import memory_efficient_attention
 from vector_quantize_pytorch import VectorQuantize
 
 
+class GEGLU(nn.Module):
+    def forward(self, x):
+        x, gate = x.chunk(2, dim=1)
+        return gate * F.gelu(x)
+
+
+def FeedForward(dim, mult=4):
+    inner_dim = int(dim * mult * 2 / 3)
+    return nn.Sequential(
+        nn.GroupNorm(1, dim),
+        nn.Conv1d(dim, inner_dim * 2, 1, bias=False),
+        GEGLU(),
+        nn.GroupNorm(1, inner_dim),
+        nn.Conv1d(inner_dim, dim, 1, bias=False),
+    )
+
+
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -57,7 +74,6 @@ class Attention(nn.Module):
         self.heads = heads
         h_dim = dim_head * heads
         self.dim_head = dim_head
-
         self.to_qkv = nn.Conv1d(in_dim, h_dim * 3, 1, bias=False)
         self.to_out = nn.Conv1d(h_dim, in_dim, 1)
 
@@ -105,7 +121,52 @@ class FlashAttention(Attention):
         out = rearrange(out, "b n h d -> b (h d) n")
         return out.to(out_dtype)
 
- 
+
+class TransformerBlocks(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        depth,
+        attn_heads=8,
+        attn_dim_head=32,
+        use_flash_attn=False,
+        use_linear_attn=False,
+        ff_mult=4,
+    ):
+        super().__init__()
+        self.in_dim = in_dim
+        self.attn_heads = attn_heads
+        self.attn_dim_head = attn_dim_head
+        self.ff_mult = ff_mult
+
+        if use_flash_attn:
+            attn_block = FlashAttention
+        elif use_linear_attn:
+            attn_block = LinearAttention
+        else:
+            attn_block = Attention
+
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        attn_block(in_dim, attn_heads, attn_dim_head),
+                        FeedForward(in_dim, ff_mult),
+                    ]
+                )
+            )
+        self.norm = nn.GroupNorm(1, in_dim)
+
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+
+        x = self.norm(x)
+        return x
+
+
 class ResnetBlock(nn.Module):
     def __init__(self, in_dim, out_dim, norm=True):
         super().__init__()
@@ -179,6 +240,7 @@ class Encoder(nn.Module):
         attn_depth=2,
         attn_heads=8,
         attn_dim_head=32,
+        ff_mult=4,
     ):
         super().__init__()
         self.init_conv = nn.Conv1d(in_dim, h_dim, 7, padding=3)
@@ -186,12 +248,6 @@ class Encoder(nn.Module):
         assert not (use_flash_attn and use_linear_attn), "can't use both attn types"
 
         res_block = ConvNextBlock if use_conv_next else ResnetBlock
-        if use_flash_attn:
-            attn_block = FlashAttention
-        elif use_linear_attn:
-            attn_block = LinearAttention
-        else:
-            attn_block = Attention
 
         h_dims = [h_dim * d for d in dim_mult]
         in_out = list(zip(h_dims[:-1], h_dims[1:]))
@@ -211,16 +267,14 @@ class Encoder(nn.Module):
                                 for i in range(num_res_blocks)
                             ]
                         ),
-                        nn.ModuleList(
-                            [
-                                Residual(
-                                    PreNorm(
-                                        dim_out,
-                                        attn_block(dim_out, attn_heads, attn_dim_head),
-                                    )
-                                )
-                                for _ in range(attn_depth)
-                            ]
+                        TransformerBlocks(
+                            dim_out,
+                            attn_depth,
+                            attn_heads,
+                            attn_dim_head,
+                            use_flash_attn,
+                            use_linear_attn,
+                            ff_mult,
                         ),
                         Downsample(dim_out)
                         if ind < (num_layers - 1)
@@ -234,8 +288,14 @@ class Encoder(nn.Module):
         # middle
         mid_dim = h_dims[-1]
         self.mid_block1 = res_block(mid_dim, mid_dim)
-        self.mid_attn = Residual(
-            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
+        self.mid_attn = TransformerBlocks(
+            mid_dim,
+            1,
+            attn_heads,
+            attn_dim_head,
+            use_flash_attn,
+            use_linear_attn,
+            ff_mult,
         )
         self.mid_block2 = res_block(mid_dim, mid_dim)
 
@@ -247,10 +307,10 @@ class Encoder(nn.Module):
         # downsample
         x = self.init_conv(x)
 
-        for blocks, attns, downsample in self.downs:
-            for block, attn in zip(blocks, attns):
+        for blocks, attn, downsample in self.downs:
+            for block in blocks:
                 x = block(x)
-                x = attn(x)
+            x = attn(x)
             x = downsample(x)
 
         # middle
@@ -279,6 +339,7 @@ class Decoder(nn.Module):
         attn_depth=2,
         attn_heads=8,
         attn_dim_head=32,
+        ff_mult=4,
     ):
         super().__init__()
 
@@ -290,19 +351,19 @@ class Decoder(nn.Module):
         num_layers = len(in_out)
 
         res_block = ConvNextBlock if use_conv_next else ResnetBlock
-        if use_flash_attn:
-            attn_block = FlashAttention
-        elif use_linear_attn:
-            attn_block = LinearAttention
-        else:
-            attn_block = Attention
 
         # middle
         mid_dim = h_dims[0]
         self.init_conv = nn.Conv1d(z_dim, mid_dim, 7, padding=3)
         self.mid_block1 = res_block(mid_dim, mid_dim)
-        self.mid_attn = Residual(
-            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
+        self.mid_attn = TransformerBlocks(
+            mid_dim,
+            1,
+            attn_heads,
+            attn_dim_head,
+            use_flash_attn,
+            use_linear_attn,
+            ff_mult,
         )
         self.mid_block2 = res_block(mid_dim, mid_dim)
 
@@ -320,16 +381,14 @@ class Decoder(nn.Module):
                                 for i in range(num_res_blocks)
                             ]
                         ),
-                        nn.ModuleList(
-                            [
-                                Residual(
-                                    PreNorm(
-                                        dim_out,
-                                        attn_block(dim_out, attn_heads, attn_dim_head),
-                                    )
-                                )
-                                for _ in range(attn_depth)
-                            ]
+                        TransformerBlocks(
+                            dim_out,
+                            attn_depth,
+                            attn_heads,
+                            attn_dim_head,
+                            use_flash_attn,
+                            use_linear_attn,
+                            ff_mult,
                         ),
                         Upsample(dim_out) if ind < (num_layers - 1) else nn.Identity(),
                     ]
@@ -352,10 +411,10 @@ class Decoder(nn.Module):
         x = self.mid_block2(x)
 
         # upsample
-        for blocks, attns, upsample in self.up:
-            for block, attn in zip(blocks, attns):
+        for blocks, attn, upsample in self.up:
+            for block in blocks:
                 x = block(x)
-                x = attn(x)
+            x = attn(x)
             x = upsample(x)
 
         # end
@@ -418,8 +477,12 @@ class VQVAE(nn.Module):
             channel_last=False,
             commitment_weight=commitment_weight,
         )
-        self.quant_conv = nn.Conv1d(z_dim, emb_dim, 1) if emb_dim != z_dim else nn.Identity()
-        self.post_quant_conv = nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
+        self.quant_conv = (
+            nn.Conv1d(z_dim, emb_dim, 1) if emb_dim != z_dim else nn.Identity()
+        )
+        self.post_quant_conv = (
+            nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
+        )
 
     def encode(self, x):
         h = self.encoder(x)
