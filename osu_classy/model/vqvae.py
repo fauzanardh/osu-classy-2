@@ -6,10 +6,10 @@ from xformers.ops import memory_efficient_attention
 from vector_quantize_pytorch import VectorQuantize
 
 
-class GEGLU(nn.Module):
+class SwiGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=1)
-        return gate * F.gelu(x)
+        return gate * F.silu(x)
 
 
 def FeedForward(dim, mult=4):
@@ -17,7 +17,7 @@ def FeedForward(dim, mult=4):
     return nn.Sequential(
         nn.GroupNorm(1, dim),
         nn.Conv1d(dim, inner_dim * 2, 1, bias=False),
-        GEGLU(),
+        SwiGLU(),
         nn.GroupNorm(1, inner_dim),
         nn.Conv1d(inner_dim, dim, 1, bias=False),
     )
