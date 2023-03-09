@@ -22,6 +22,20 @@ def bce_generator_loss(fake):
     return -log(torch.sigmoid(fake)).mean()
 
 
+def gradient_penalty(sig, output, weight=10):
+    gradients = torch.autograd.grad(
+        outputs=output,
+        inputs=sig,
+        grad_outputs=torch.ones_like(output, device=sig.device),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+
+    gradients = rearrange(gradients, "b ... -> b (...)")
+    return weight * ((gradients.norm(2, dim=-1) - 1) ** 2).mean()
+
+
 class SwiGLU(nn.Module):
     def forward(self, x):
         x, gate = x.chunk(2, dim=1)
@@ -87,7 +101,7 @@ class Attention(nn.Module):
     def __init__(self, in_dim, heads=8, dim_head=64):
         super().__init__()
         self.heads = heads
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
 
         h_dim = dim_head * heads
         self.dim_head = dim_head
@@ -570,17 +584,43 @@ class VQGANVAE(nn.Module):
         fmap = rearrange(fmap, "b l c -> b c l")
         return self.decode(fmap)
 
-    def forward(self, x, return_indices=False):
-        fmap, indices, commit_loss = self.encode(x)
+    def forward(
+        self,
+        sig,
+        return_loss=False,
+        return_disc_loss=False,
+        return_recons=False,
+        add_gradient_penalty=True,
+    ):
+        fmap, indices, commit_loss = self.encode(sig)
         fmap = self.decode(fmap)
-        fmap.detach_()
-        x.requires_grad_()
 
-        recon_loss = F.mse_loss(fmap, x)
+        if not (return_loss or return_disc_loss):
+            return fmap
+
+        assert (
+            return_loss or return_disc_loss
+        ), "must return at least one of vae loss or disc_loss"
+
+        if return_disc_loss:
+            fmap.detach_()
+            sig.requires_grad_()
+
+            fmap_disc_logits, sig_disc_logits = map(self.discriminator, (fmap, sig))
+            disc_loss = self.discriminator_loss(fmap_disc_logits, sig_disc_logits)
+
+            if add_gradient_penalty:
+                gp = gradient_penalty(sig, sig_disc_logits)
+                loss = disc_loss + gp
+
+            if return_recons:
+                return loss, fmap
+            return loss
+
+        recon_loss = F.mse_loss(fmap, sig)
         gen_loss = self.generator_loss(self.discriminator(fmap))
 
         loss = recon_loss + commit_loss + gen_loss
-        if return_indices:
-            return fmap, loss, indices
-        else:
-            return fmap, loss
+        if return_recons:
+            return loss, fmap
+        return loss
