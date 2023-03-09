@@ -18,10 +18,6 @@ def bce_discriminator_loss(fake, real):
     return (-log(1 - torch.sigmoid(fake)) - log(torch.sigmoid(real))).mean()
 
 
-def bce_generator_loss(fake):
-    return -log(torch.sigmoid(fake)).mean()
-
-
 def gradient_penalty(sig, output, weight=10):
     gradients = torch.autograd.grad(
         outputs=output,
@@ -563,7 +559,6 @@ class VQGANVAE(nn.Module):
             in_dim,
         )
         self.discriminator_loss = bce_discriminator_loss
-        self.generator_loss = bce_generator_loss
 
     @property
     def codebook(self):
@@ -618,9 +613,8 @@ class VQGANVAE(nn.Module):
             return loss
 
         recon_loss = F.mse_loss(fmap, sig)
-        gen_loss = self.generator_loss(self.discriminator(fmap))
+        loss = recon_loss + commit_loss
 
-        loss = recon_loss + commit_loss + gen_loss
         if return_recons:
             return loss, fmap
         return loss
