@@ -36,23 +36,6 @@ def gradient_penalty(sig, output, weight=10):
     return weight * ((gradients.norm(2, dim=-1) - 1) ** 2).mean()
 
 
-class SwiGLU(nn.Module):
-    def forward(self, x):
-        x, gate = x.chunk(2, dim=1)
-        return gate * F.silu(x)
-
-
-def FeedForward(dim, mult=4):
-    inner_dim = int(dim * mult * 2 / 3)
-    return nn.Sequential(
-        nn.GroupNorm(1, dim),
-        nn.Conv1d(dim, inner_dim * 2, 1, bias=False),
-        SwiGLU(),
-        nn.GroupNorm(1, inner_dim),
-        nn.Conv1d(inner_dim, dim, 1, bias=False),
-    )
-
-
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
