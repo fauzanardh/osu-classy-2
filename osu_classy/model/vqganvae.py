@@ -555,7 +555,7 @@ class VQGANVAE(nn.Module):
                 return loss, fmap
             return loss
 
-        recon_loss = F.mse_loss(fmap, sig)
+        recon_loss = F.l1_loss(fmap, sig)
         gen_loss = hinge_generator_loss(self.discriminator(fmap))
 
         loss = recon_loss + commit_loss + gen_loss
