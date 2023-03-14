@@ -461,7 +461,7 @@ class VQVAE(nn.Module):
         attn_depth=2,
         attn_heads=16,
         attn_dim_head=64,
-        commitment_weight=0.25,
+        commitment_weight=1.0,
         use_l1_loss=False,
     ):
         super().__init__()
