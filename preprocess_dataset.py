@@ -7,24 +7,23 @@ from tqdm.auto import tqdm
 from functools import partial
 from multiprocessing import Pool
 from audioread.ffdec import FFmpegAudioFile
-
-from osu_classy.osu.beatmap import Beatmap
 from osu_classy.osu.hit_objects import Circle, Slider, Spinner
+from osu_classy.utils.smooth_hit import encode_hit, encode_hold
+from osu_classy.osu.beatmap import Beatmap
 from osu_classy.osu.sliders import Bezier
-from osu_classy.utils.smooth_hit import smooth_hit
 
 
 N_FFT = 2048
 N_MFCC = 20
-SR = 22050
-FRAME_RATE = 6
-HOP_LENGTH = int(SR * FRAME_RATE / 1000)
 N_MELS = 64
+SR = 22050
+FRAME_RATE = 4
+HOP_LENGTH = int(SR * FRAME_RATE / 1000)
 
 
 def load_audio(audio_path):
     aro = FFmpegAudioFile(audio_path)
-    wave, _ = librosa.load(aro, sr=SR)
+    wave, _ = librosa.load(aro, sr=SR, res_type="kaiser_best")
     if wave.shape[0] == 0:
         raise ValueError("Empty audio file")
 
@@ -53,18 +52,14 @@ def from_beatmap(beatmap, frame_times):
     hit_signals = np.zeros((4, frame_times.shape[0]))
     for ho in beatmap.hit_objects:
         if isinstance(ho, Circle):
-            hit_signals[0] += smooth_hit(frame_times, float(ho.t))
+            encode_hit(hit_signals[0], frame_times, float(ho.t))
         elif isinstance(ho, Slider):
-            hit_signals[1] += smooth_hit(
-                frame_times, (float(ho.t), float(ho.end_time()))
-            )
+            encode_hold(hit_signals[1], frame_times, float(ho.t), float(ho.end_time()))
         elif isinstance(ho, Spinner):
-            hit_signals[2] += smooth_hit(
-                frame_times, (float(ho.t), float(ho.end_time()))
-            )
+            encode_hold(hit_signals[2], frame_times, float(ho.t), float(ho.end_time()))
 
         if ho.new_combo:
-            hit_signals[3] += smooth_hit(frame_times, float(ho.t))
+            encode_hit(hit_signals[3], frame_times, float(ho.t))
 
     slider_signals = np.zeros((2, frame_times.shape[0]))
     for ho in beatmap.hit_objects:
@@ -74,15 +69,13 @@ def from_beatmap(beatmap, frame_times):
         if ho.slides > 1:
             single_slide = ho.slide_duration / ho.slides
             for i in range(1, ho.slides):
-                slider_signals[0] += smooth_hit(
-                    frame_times, float(ho.t + single_slide * i)
-                )
+                encode_hit(slider_signals[0], frame_times, ho.t + ho.slide_duration)
 
             if isinstance(ho, Bezier):
                 seg_len_t = np.cumsum([0] + [c.length for c in ho.path_segments])
                 seg_boundaries = seg_len_t / ho.length * ho.slide_duration + ho.t
-                for boundary in seg_boundaries:
-                    slider_signals[1] += smooth_hit(frame_times, boundary)
+                for boundary in seg_boundaries[1:-1]:
+                    encode_hit(slider_signals[1], frame_times, boundary)
 
     pos = []
     for t, (a, b) in zip(frame_times, hit_object_pairs(beatmap, frame_times)):
@@ -103,13 +96,12 @@ def from_beatmap(beatmap, frame_times):
         else:
             f = (t - a.end_time()) / (b.t - a.end_time())
             pos.append((1 - f) * a.end_pos() + f * b.start_pos())
-    cursor_signals = np.array(pos).T
-    cursor_signals = (cursor_signals - cursor_signals.min(axis=1, keepdims=True)) / (
-        cursor_signals.max(axis=1, keepdims=True)
-        - cursor_signals.min(axis=1, keepdims=True)
-    )
+    cursor_signals = (np.array(pos) / np.array([512, 384])).T
+    cursor_signals = cursor_signals * 2 - 1
 
-    return np.concatenate([hit_signals, slider_signals, cursor_signals], axis=0)
+    out = np.concatenate([hit_signals, slider_signals, cursor_signals], axis=0)
+
+    return out
 
 
 def prepare_map(data_dir, map_file):
@@ -140,7 +132,9 @@ def prepare_map(data_dir, map_file):
         [bm.audio_filename.stem, *(s[1:] for s in bm.audio_filename.suffixes)]
     )
     map_dir = data_dir / map_file.parent.name / af_dir
-    spec_path = map_dir / "spec.npz"
+    cache_dir = data_dir.parent / "cache" / map_file.parent.name / af_dir
+    map_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = cache_dir / "spec.npz"
     map_path = map_dir / f"{map_file.stem}.map.npz"
 
     if map_path.exists():
@@ -183,13 +177,19 @@ def prepare_map(data_dir, map_file):
         * 1000
     )
 
-    x = from_beatmap(bm, frame_times)
+    with np.errstate(divide="raise", invalid="raise"):
+        try:
+            x = from_beatmap(bm, frame_times)
+        except FloatingPointError:
+            print(f"Failed to convert {map_file.name}")
+            return
     np.savez_compressed(map_path, x=x)
 
 
 if __name__ == "__main__":
-    src_path = Path("/mnt/d/Games/osu!/Songs/")
-    dst_path = Path("/mnt/d/Dataset/beatmaps_v1/")
+    src_path = Path("D:/Games/osu!/Songs/1889729 15shoujo - Non-breath oblege/")
+    # src_path = Path("D:/Games/osu!/Songs/")
+    dst_path = Path("data/beatmaps_v5/")
 
     src_maps = list(src_path.glob("**/*.osu"))
     random.shuffle(src_maps)
