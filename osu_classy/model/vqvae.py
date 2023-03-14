@@ -109,11 +109,11 @@ class LinearAttention(Attention):
         q = q * self.q_scale
         k = k * self.k_scale
 
-        q = q.softmax(dim=-2)
+        q = q.softmax(dim=-2) * self.scale
         k = k.softmax(dim=-1)
 
         ctx = torch.einsum("b h d n, b h e n -> b h d e", k, v)
-        out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q) * self.scale
+        out = torch.einsum("b h d e, b h d n -> b h e n", ctx, q)
         out = rearrange(out, "b h c l -> b (h c) l")
         return out
 
