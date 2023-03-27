@@ -373,7 +373,7 @@ class Discriminator(nn.Module):
             [
                 nn.Sequential(
                     nn.Conv1d(channels, dims[0], 7, padding=3),
-                    nn.SiLU(),
+                    nn.LeakyReLU(0.2, inplace=True),
                 ),
             ]
         )
@@ -383,14 +383,14 @@ class Discriminator(nn.Module):
                 nn.Sequential(
                     nn.Conv1d(in_dim, out_dim, 7, padding=3),
                     nn.GroupNorm(groups, out_dim),
-                    nn.SiLU(),
+                    nn.LeakyReLU(0.2, inplace=True),
                 )
             )
 
         dim = dims[-1]
         self.to_logits = nn.Sequential(
             nn.Conv1d(dim, dim, 1),
-            nn.SiLU(),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(dim, 1, 1),
         )
 
