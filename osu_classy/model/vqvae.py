@@ -380,7 +380,7 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    nn.Conv1d(in_dim, out_dim, 7, padding=3),
+                    nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1, padding_mode="reflect"),
                     nn.SiLU(),
                 )
             )
