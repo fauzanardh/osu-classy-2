@@ -365,7 +365,6 @@ class Discriminator(nn.Module):
         self,
         dims,
         channels=8,
-        groups=16,
     ):
         super().__init__()
         dim_pairs = list(zip(dims[:-1], dims[1:]))
@@ -382,7 +381,6 @@ class Discriminator(nn.Module):
             self.layers.append(
                 nn.Sequential(
                     nn.Conv1d(in_dim, out_dim, 7, padding=3),
-                    nn.GroupNorm(groups, out_dim),
                     nn.SiLU(),
                 )
             )
