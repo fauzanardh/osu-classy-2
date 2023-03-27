@@ -6,14 +6,6 @@ from xformers.ops import memory_efficient_attention
 from vector_quantize_pytorch import VectorQuantize
 
 
-def FeedForward(dim, mult=4):
-    return nn.Sequential(
-        nn.Conv1d(dim, dim * mult, 1),
-        nn.SiLU(),
-        nn.Conv1d(dim * mult, dim, 1),
-    )
-
-
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -114,51 +106,6 @@ class FlashAttention(Attention):
         return out.to(out_dtype)
 
 
-class TransformerBlocks(nn.Module):
-    def __init__(
-        self,
-        in_dim,
-        depth,
-        attn_heads=8,
-        attn_dim_head=32,
-        use_flash_attn=False,
-        use_linear_attn=False,
-        ff_mult=4,
-    ):
-        super().__init__()
-        self.in_dim = in_dim
-        self.attn_heads = attn_heads
-        self.attn_dim_head = attn_dim_head
-        self.ff_mult = ff_mult
-
-        if use_flash_attn:
-            attn_block = FlashAttention
-        elif use_linear_attn:
-            attn_block = LinearAttention
-        else:
-            attn_block = Attention
-
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        attn_block(in_dim, attn_heads, attn_dim_head),
-                        FeedForward(in_dim, ff_mult),
-                    ]
-                )
-            )
-        self.norm = nn.GroupNorm(1, in_dim)
-
-    def forward(self, x):
-        for attn, ff in self.layers:
-            x = attn(x) + x
-            x = ff(x) + x
-
-        x = self.norm(x)
-        return x
-
-
 class ResnetBlock(nn.Module):
     def __init__(self, in_dim, out_dim, norm=True):
         super().__init__()
@@ -188,36 +135,6 @@ class ResnetBlock(nn.Module):
         return x + h
 
 
-class ConvNextBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, mult=2):
-        super().__init__()
-
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-
-        self.ds_conv = nn.Conv1d(
-            in_dim, in_dim, 7, padding=3, groups=in_dim, padding_mode="reflect"
-        )
-        self.net = nn.Sequential(
-            nn.GroupNorm(1, in_dim),
-            nn.Conv1d(in_dim, out_dim * mult, 7, padding=3, padding_mode="reflect"),
-            nn.SiLU(),
-            nn.GroupNorm(1, out_dim * mult),
-            nn.Conv1d(out_dim * mult, out_dim, 7, padding=3, padding_mode="reflect"),
-        )
-        if self.in_dim != self.out_dim:
-            self.shortcut = nn.Conv1d(in_dim, out_dim, 1)
-
-    def forward(self, x):
-        h = self.ds_conv(x)
-        h = self.net(h)
-
-        if self.in_dim != self.out_dim:
-            x = self.shortcut(x)
-
-        return x + h
-
-
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -227,19 +144,21 @@ class Encoder(nn.Module):
         dim_mult=(1, 2, 4, 8),
         use_flash_attn=False,
         use_linear_attn=False,
-        use_conv_next=False,
         num_res_blocks=3,
-        attn_depth=2,
         attn_heads=16,
         attn_dim_head=64,
-        ff_mult=4,
     ):
         super().__init__()
         self.init_conv = nn.Conv1d(in_dim, h_dim, 7, padding=3)
 
         assert not (use_flash_attn and use_linear_attn), "can't use both attn types"
 
-        res_block = ConvNextBlock if use_conv_next else ResnetBlock
+        if use_flash_attn:
+            attn_block = FlashAttention
+        elif use_linear_attn:
+            attn_block = LinearAttention
+        else:
+            attn_block = Attention
 
         h_dims = [h_dim * d for d in dim_mult]
         in_out = list(zip(h_dims[:-1], h_dims[1:]))
@@ -252,21 +171,23 @@ class Encoder(nn.Module):
                     [
                         nn.ModuleList(
                             [
-                                res_block(
+                                ResnetBlock(
                                     dim_in if i == 0 else dim_out,
                                     dim_out,
                                 )
                                 for i in range(num_res_blocks)
                             ]
                         ),
-                        TransformerBlocks(
-                            dim_out,
-                            attn_depth,
-                            attn_heads,
-                            attn_dim_head,
-                            use_flash_attn,
-                            use_linear_attn,
-                            ff_mult,
+                        nn.ModuleList(
+                            [
+                                Residual(
+                                    PreNorm(
+                                        dim_out,
+                                        attn_block(dim_out, attn_heads, attn_dim_head),
+                                    )
+                                )
+                                for _ in range(num_res_blocks)
+                            ]
                         ),
                         Downsample(dim_out)
                         if ind < (num_layers - 1)
@@ -279,17 +200,11 @@ class Encoder(nn.Module):
 
         # middle
         mid_dim = h_dims[-1]
-        self.mid_block1 = res_block(mid_dim, mid_dim)
-        self.mid_attn = TransformerBlocks(
-            mid_dim,
-            1,
-            attn_heads,
-            attn_dim_head,
-            use_flash_attn,
-            use_linear_attn,
-            ff_mult,
+        self.mid_block1 = ResnetBlock(mid_dim, mid_dim)
+        self.mid_attn = Residual(
+            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
         )
-        self.mid_block2 = res_block(mid_dim, mid_dim)
+        self.mid_block2 = ResnetBlock(mid_dim, mid_dim)
 
         # end
         self.norm = nn.GroupNorm(1, mid_dim)
@@ -299,10 +214,10 @@ class Encoder(nn.Module):
         # downsample
         x = self.init_conv(x)
 
-        for blocks, attn, downsample in self.downs:
-            for block in blocks:
+        for blocks, attns, downsample in self.downs:
+            for block, attn in zip(blocks, attns):
                 x = block(x)
-            x = attn(x)
+                x = attn(x)
             x = downsample(x)
 
         # middle
@@ -326,9 +241,7 @@ class Decoder(nn.Module):
         dim_mult=(1, 2, 4, 8),
         use_flash_attn=False,
         use_linear_attn=False,
-        use_conv_next=False,
         num_res_blocks=3,
-        attn_depth=2,
         attn_heads=16,
         attn_dim_head=64,
         ff_mult=4,
@@ -342,22 +255,21 @@ class Decoder(nn.Module):
         in_out = list(zip(h_dims[:-1], h_dims[1:]))
         num_layers = len(in_out)
 
-        res_block = ConvNextBlock if use_conv_next else ResnetBlock
+        if use_flash_attn:
+            attn_block = FlashAttention
+        elif use_linear_attn:
+            attn_block = LinearAttention
+        else:
+            attn_block = Attention
 
         # middle
         mid_dim = h_dims[0]
         self.init_conv = nn.Conv1d(z_dim, mid_dim, 7, padding=3)
-        self.mid_block1 = res_block(mid_dim, mid_dim)
-        self.mid_attn = TransformerBlocks(
-            mid_dim,
-            1,
-            attn_heads,
-            attn_dim_head,
-            use_flash_attn,
-            use_linear_attn,
-            ff_mult,
+        self.mid_block1 = ResnetBlock(mid_dim, mid_dim)
+        self.mid_attn = Residual(
+            PreNorm(mid_dim, attn_block(mid_dim, attn_heads, attn_dim_head))
         )
-        self.mid_block2 = res_block(mid_dim, mid_dim)
+        self.mid_block2 = ResnetBlock(mid_dim, mid_dim)
 
         # up
         self.up = nn.ModuleList(
@@ -366,21 +278,23 @@ class Decoder(nn.Module):
                     [
                         nn.ModuleList(
                             [
-                                res_block(
+                                ResnetBlock(
                                     dim_in if i == 0 else dim_out,
                                     dim_out,
                                 )
                                 for i in range(num_res_blocks)
                             ]
                         ),
-                        TransformerBlocks(
-                            dim_out,
-                            attn_depth,
-                            attn_heads,
-                            attn_dim_head,
-                            use_flash_attn,
-                            use_linear_attn,
-                            ff_mult,
+                        nn.ModuleList(
+                            [
+                                Residual(
+                                    PreNorm(
+                                        dim_out,
+                                        attn_block(dim_out, attn_heads, attn_dim_head),
+                                    )
+                                )
+                                for _ in range(num_res_blocks)
+                            ]
                         ),
                         Upsample(dim_out) if ind < (num_layers - 1) else nn.Identity(),
                     ]
@@ -403,10 +317,10 @@ class Decoder(nn.Module):
         x = self.mid_block2(x)
 
         # upsample
-        for blocks, attn, upsample in self.up:
-            for block in blocks:
+        for blocks, attns, upsample in self.up:
+            for block, attn in zip(blocks, attns):
                 x = block(x)
-            x = attn(x)
+                x = attn(x)
             x = upsample(x)
 
         # end
@@ -427,9 +341,7 @@ class VQVAE(nn.Module):
         dim_mult=(1, 2, 4, 8),
         use_flash_attn=False,
         use_linear_attn=False,
-        use_conv_next=False,
         num_res_blocks=3,
-        attn_depth=2,
         attn_heads=16,
         attn_dim_head=64,
         commitment_weight=1.0,
@@ -444,9 +356,7 @@ class VQVAE(nn.Module):
             dim_mult=dim_mult,
             use_flash_attn=use_flash_attn,
             use_linear_attn=use_linear_attn,
-            use_conv_next=use_conv_next,
             num_res_blocks=num_res_blocks,
-            attn_depth=attn_depth,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
         )
@@ -457,9 +367,7 @@ class VQVAE(nn.Module):
             dim_mult=dim_mult,
             use_flash_attn=use_flash_attn,
             use_linear_attn=use_linear_attn,
-            use_conv_next=use_conv_next,
             num_res_blocks=num_res_blocks,
-            attn_depth=attn_depth,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
         )
