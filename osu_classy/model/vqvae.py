@@ -6,6 +6,36 @@ from xformers.ops import memory_efficient_attention
 from vector_quantize_pytorch import VectorQuantize
 
 
+def l2norm(t):
+    return F.normalize(t, dim=-1)
+
+
+def log(t, eps=1e-10):
+    return torch.log(t + eps)
+
+
+def bce_discriminator_loss(fake, real):
+    return (-log(1 - torch.sigmoid(fake)) - log(torch.sigmoid(real))).mean()
+
+
+def bce_generator_loss(fake):
+    return -log(torch.sigmoid(fake)).mean()
+
+
+def gradient_penalty(sig, output, weight=10):
+    gradients = torch.autograd.grad(
+        outputs=output,
+        inputs=sig,
+        grad_outputs=torch.ones_like(output, device=sig.device),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+
+    gradients = rearrange(gradients, "b ... -> b (...)")
+    return weight * ((gradients.norm(2, dim=-1) - 1) ** 2).mean()
+
+
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -330,6 +360,44 @@ class Decoder(nn.Module):
         return torch.tanh(x)
 
 
+class Discriminator(nn.Module):
+    def __init__(
+        self,
+        dims,
+        channels=8,
+    ):
+        super().__init__()
+        dim_pairs = list(zip(dims[:-1], dims[1:]))
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv1d(channels, dims[0], 7, padding=3),
+                    nn.SiLU(),
+                ),
+            ]
+        )
+
+        for in_dim, out_dim in dim_pairs:
+            self.layers.append(
+                nn.Sequential(
+                    nn.Conv1d(in_dim, out_dim, 7, padding=3),
+                    nn.SiLU(),
+                )
+            )
+
+        dim = dims[-1]
+        self.to_logits = nn.Sequential(
+            nn.Conv1d(dim, dim, 1),
+            nn.SiLU(),
+            nn.Conv1d(dim, 1, 1),
+        )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return self.to_logits(x)
+
+
 class VQVAE(nn.Module):
     def __init__(
         self,
@@ -345,6 +413,7 @@ class VQVAE(nn.Module):
         attn_heads=16,
         attn_dim_head=64,
         commitment_weight=1.0,
+        discriminator_layers=4,
         use_l1_loss=False,
     ):
         super().__init__()
@@ -387,7 +456,16 @@ class VQVAE(nn.Module):
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
 
+        layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
+        layer_dims = [h_dim * m for m in layer_mults]
+        self.discriminator = Discriminator(
+            layer_dims,
+            in_dim,
+        )
+
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
+        self.discriminator_loss_fn = bce_discriminator_loss
+        self.generator_loss_fn = bce_generator_loss
 
     @property
     def codebook(self):
@@ -408,13 +486,40 @@ class VQVAE(nn.Module):
         fmap = rearrange(fmap, "b l c -> b c l")
         return self.decode(fmap)
 
-    def forward(self, sig, return_recons=False):
+    def forward(
+        self,
+        sig,
+        return_loss=False,
+        return_disc_loss=False,
+        return_recons=False,
+        add_gradient_penalty=True,
+    ):
         fmap, _, commit_loss = self.encode(sig)
         fmap = self.decode(fmap)
 
-        recon_loss = self.recon_loss_fn(fmap, sig)
-        loss = recon_loss + commit_loss
+        if not (return_loss or return_disc_loss):
+            return fmap
 
+        if return_disc_loss:
+            fmap.detach_()
+            sig.requires_grad_()
+
+            fmap_disc_logits, sig_disc_logits = map(self.discriminator, (fmap, sig))
+            disc_loss = self.discriminator_loss_fn(fmap_disc_logits, sig_disc_logits)
+
+            if add_gradient_penalty:
+                gp = gradient_penalty(sig, sig_disc_logits)
+                loss = disc_loss + gp
+
+            if return_recons:
+                return loss, fmap
+            else:
+                return loss
+
+        recon_loss = self.recon_loss_fn(fmap, sig)
+        gen_loss = self.generator_loss_fn(self.discriminator(fmap))
+
+        loss = recon_loss + commit_loss + gen_loss
         if return_recons:
             return loss, fmap
         else:
