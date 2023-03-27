@@ -366,13 +366,19 @@ class Discriminator(nn.Module):
         dims,
         channels=8,
         groups=16,
+        init_kernel_size=5,
     ):
         super().__init__()
         dim_pairs = list(zip(dims[:-1], dims[1:]))
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv1d(channels, dims[0], 7, padding=3),
+                    nn.Conv1d(
+                        channels,
+                        dims[0],
+                        init_kernel_size,
+                        padding=init_kernel_size // 2,
+                    ),
                     nn.LeakyReLU(0.2, inplace=True),
                 ),
             ]
@@ -381,7 +387,7 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    nn.Conv1d(in_dim, out_dim, 7, padding=3),
+                    nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1),
                     nn.GroupNorm(groups, out_dim),
                     nn.LeakyReLU(0.2, inplace=True),
                 )
@@ -391,7 +397,7 @@ class Discriminator(nn.Module):
         self.to_logits = nn.Sequential(
             nn.Conv1d(dim, dim, 1),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(dim, 1, 1),
+            nn.Conv1d(dim, 1, 4),
         )
 
     def forward(self, x):
