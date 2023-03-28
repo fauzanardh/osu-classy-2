@@ -22,6 +22,14 @@ def bce_generator_loss(fake):
     return -log(torch.sigmoid(fake)).mean()
 
 
+def hinge_discriminator_loss(fake, real):
+    return (F.relu(1 + fake) + F.relu(1 - real)).mean()
+
+
+def hinge_generator_loss(fake):
+    return -fake.mean()
+
+
 def gradient_penalty(sig, output, weight=10):
     gradients = torch.autograd.grad(
         outputs=output,
@@ -419,6 +427,7 @@ class VQVAE(nn.Module):
         attn_dim_head=64,
         commitment_weight=1.0,
         discriminator_layers=4,
+        use_hinge_loss=False,
         use_l1_loss=False,
     ):
         super().__init__()
@@ -469,8 +478,12 @@ class VQVAE(nn.Module):
         )
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
-        self.discriminator_loss_fn = bce_discriminator_loss
-        self.generator_loss_fn = bce_generator_loss
+        self.discriminator_loss_fn = (
+            bce_discriminator_loss if not use_hinge_loss else hinge_discriminator_loss
+        )
+        self.generator_loss_fn = (
+            bce_generator_loss if not use_hinge_loss else hinge_generator_loss
+        )
 
     @property
     def codebook(self):
