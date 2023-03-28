@@ -36,13 +36,11 @@ def gradient_penalty(sig, output, weight=10):
     return weight * ((gradients.norm(2, dim=-1) - 1) ** 2).mean()
 
 
-def wgangp_discriminator_loss(fake, real):
-    return (
-        -torch.mean(real) + torch.mean(fake) + gradient_penalty(real, torch.mean(real))
-    )
+def wgan_discriminator_loss(fake, real):
+    return -torch.mean(real) + torch.mean(fake)
 
 
-def wgangp_generator_loss(fake):
+def wgan_generator_loss(fake):
     return -torch.mean(fake)
 
 
@@ -465,7 +463,7 @@ class VQVAE(nn.Module):
         attn_heads=16,
         attn_dim_head=64,
         commitment_weight=1.0,
-        use_wgangp_loss=False,
+        use_wgan_loss=False,
         use_l1_loss=False,
     ):
         super().__init__()
@@ -511,10 +509,10 @@ class VQVAE(nn.Module):
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
         self.discriminator_loss_fn = (
-            bce_discriminator_loss if use_wgangp_loss else wgangp_discriminator_loss
+            bce_discriminator_loss if use_wgan_loss else wgan_discriminator_loss
         )
         self.generator_loss_fn = (
-            bce_generator_loss if use_wgangp_loss else wgangp_generator_loss
+            bce_generator_loss if use_wgan_loss else wgan_generator_loss
         )
 
     @property
@@ -542,6 +540,7 @@ class VQVAE(nn.Module):
         return_loss=False,
         return_disc_loss=False,
         return_recons=False,
+        add_gradient_penalty=False,
     ):
         fmap, _, commit_loss = self.encode(sig)
         fmap = self.decode(fmap)
@@ -555,6 +554,9 @@ class VQVAE(nn.Module):
 
             fmap_disc_logits, sig_disc_logits = map(self.discriminator, (fmap, sig))
             loss = self.discriminator_loss_fn(fmap_disc_logits, sig_disc_logits)
+
+            if add_gradient_penalty:
+                loss += gradient_penalty(sig, sig_disc_logits)
 
             if return_recons:
                 return loss, fmap
