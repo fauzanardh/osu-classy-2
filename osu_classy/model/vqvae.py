@@ -406,41 +406,24 @@ class Discriminator(nn.Module):
         return self.to_logits(x)
 
 
-# class Discriminator(nn.Module):
-#     def __init__(self, ch):
-#         super().__init__()
-#         self.layers = nn.Sequential(
-#             nn.Conv1d(ch, 512, 7, padding=3),
-#             nn.SiLU(),
-#             nn.Conv1d(512, 256, 7, padding=3),
-#             nn.SiLU(),
-#             nn.Conv1d(256, 128, 7, padding=3),
-#             nn.SiLU(),
-#             nn.Conv1d(128, 1, 7, padding=3),
-#         )
+class LinearDiscriminator(nn.Module):
+    def __init__(self, ch):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(ch, 512),
+            nn.SiLU(),
+            nn.Linear(512, 256),
+            nn.SiLU(),
+            nn.Linear(256, 128),
+            nn.SiLU(),
+            nn.Linear(128, 1),
+        )
 
-#     def forward(self, x):
-#         return self.layers(x)
-
-
-# class Discriminator(nn.Module):
-#     def __init__(self, ch):
-#         super().__init__()
-#         self.layers = nn.Sequential(
-#             nn.Linear(ch, 512),
-#             nn.SiLU(),
-#             nn.Linear(512, 256),
-#             nn.SiLU(),
-#             nn.Linear(256, 128),
-#             nn.SiLU(),
-#             nn.Linear(128, 1),
-#         )
-
-#     def forward(self, x):
-#         # rearrange to (batch, seq_len, channels)
-#         x = rearrange(x, "b c l -> b l c")
-#         x = self.layers(x)
-#         return x
+    def forward(self, x):
+        # rearrange to (batch, seq_len, channels)
+        x = rearrange(x, "b c l -> b l c")
+        x = self.layers(x)
+        return x
 
 
 class VQVAE(nn.Module):
@@ -458,6 +441,7 @@ class VQVAE(nn.Module):
         attn_heads=16,
         attn_dim_head=64,
         commitment_weight=1.0,
+        use_linear_discriminator=False,
         discriminator_layers=4,
         use_wgan_loss=False,
         use_l1_loss=False,
@@ -501,12 +485,16 @@ class VQVAE(nn.Module):
         self.post_quant_conv = (
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
-        layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
-        layer_dims = [h_dim * m for m in layer_mults]
-        self.discriminator = Discriminator(
-            in_dim,
-            layer_dims,
-        )
+
+        if use_linear_discriminator:
+            self.discriminator = LinearDiscriminator(in_dim)
+        else:
+            layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
+            layer_dims = [h_dim * m for m in layer_mults]
+            self.discriminator = Discriminator(
+                in_dim,
+                layer_dims,
+            )
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
         self.discriminator_loss_fn = (
