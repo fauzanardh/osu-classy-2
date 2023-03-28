@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -449,9 +448,6 @@ class Discriminator(nn.Module):
         # rearrange to (batch, seq_len, channels)
         x = rearrange(x, "b c l -> b l c")
         x = self.layers(x)
-
-        # rearrange to (batch, channels, seq_len)
-        x = rearrange(x, "b l c -> b c l")
         return x
 
 
