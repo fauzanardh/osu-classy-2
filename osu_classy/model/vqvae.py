@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -414,21 +415,38 @@ class Decoder(nn.Module):
 #         return x.to(torch.float16)
 
 
+# class Discriminator(nn.Module):
+#     def __init__(self, ch):
+#         super().__init__()
+#         self.layers = nn.Sequential(
+#             nn.Conv1d(ch, 512, 7, padding=3),
+#             nn.SiLU(),
+#             nn.Conv1d(512, 256, 7, padding=3),
+#             nn.SiLU(),
+#             nn.Conv1d(256, 128, 7, padding=3),
+#             nn.SiLU(),
+#             nn.Conv1d(128, 1, 7, padding=3),
+#         )
+
+#     def forward(self, x):
+#         return self.layers(x)
+
+
 class Discriminator(nn.Module):
-    def __init__(self, ch):
+    def __init__(self, shape):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Conv1d(ch, 512, 7, padding=3),
+            nn.Linear(int(np.prod(shape)), 512),
             nn.SiLU(),
-            nn.Conv1d(512, 256, 7, padding=3),
+            nn.Linear(512, 256),
             nn.SiLU(),
-            nn.Conv1d(256, 128, 7, padding=3),
+            nn.Linear(256, 128),
             nn.SiLU(),
-            nn.Conv1d(128, 1, 7, padding=3),
+            nn.Linear(128, 1),
         )
-    
+
     def forward(self, x):
-        return self.layers(x)
+        return self.layers(x.view(x.shape[0], -1))
 
 
 class VQVAE(nn.Module):
