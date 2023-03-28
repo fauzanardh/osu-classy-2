@@ -426,6 +426,9 @@ class Discriminator(nn.Module):
             nn.SiLU(),
             nn.Conv1d(128, 1, 7, padding=3),
         )
+    
+    def forward(self, x):
+        return self.layers(x)
 
 
 class VQVAE(nn.Module):
