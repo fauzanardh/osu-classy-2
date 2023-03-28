@@ -400,15 +400,10 @@ class Discriminator(nn.Module):
         )
 
     def forward(self, x):
-        # Do calculation in fp32
-        x = x.to(torch.float32)
         for layer in self.layers:
             x = layer(x)
 
-        x = self.to_logits(x)
-
-        # Return logits in fp16
-        return x.to(torch.float16)
+        return self.to_logits(x)
 
 
 # class Discriminator(nn.Module):
