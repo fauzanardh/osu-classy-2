@@ -371,7 +371,7 @@ class Discriminator(nn.Module):
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv1d(channels, dims[0], 4, stride=2, padding=1),
+                    nn.Conv1d(channels, dims[0], 7, padding=3),
                     nn.SiLU(),
                 ),
             ]
@@ -380,7 +380,7 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1),
+                    Downsample(in_dim, out_dim),
                     nn.SiLU(),
                 )
             )
@@ -389,7 +389,7 @@ class Discriminator(nn.Module):
         self.to_logits = nn.Sequential(
             nn.Conv1d(dim, dim, 1),
             nn.SiLU(),
-            nn.Conv1d(dim, 1, 1),
+            nn.Conv1d(dim, 1, 4),
         )
 
     def forward(self, x):
