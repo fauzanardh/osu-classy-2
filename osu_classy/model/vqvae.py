@@ -405,7 +405,7 @@ class Discriminator(nn.Module):
 class LinearDiscriminator(nn.Module):
     def __init__(self, in_dim, h_dims):
         super().__init__()
-        layers = [nn.Linear(in_dim, 512), nn.SiLU()]
+        layers = [nn.Linear(in_dim, h_dims[0]), nn.SiLU()]
 
         dim_pairs = list(zip(h_dims[:-1], h_dims[1:]))
         for _in_dim, _out_dim in dim_pairs:
