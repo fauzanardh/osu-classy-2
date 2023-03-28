@@ -393,9 +393,14 @@ class Discriminator(nn.Module):
         )
 
     def forward(self, x):
+        # force to use fp32
+        x = x.float()
         for layer in self.layers:
             x = layer(x)
-        return self.to_logits(x)
+        logits = self.to_logits(x)
+
+        # return back to fp16
+        return logits.half()
 
 
 class VQVAE(nn.Module):
