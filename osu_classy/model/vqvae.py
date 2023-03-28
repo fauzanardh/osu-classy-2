@@ -464,7 +464,7 @@ class VQVAE(nn.Module):
         attn_heads=16,
         attn_dim_head=64,
         commitment_weight=1.0,
-        discriminator_layers=4,
+        discriminator_shape=(4096, 8),
         use_wgangp_loss=False,
         use_l1_loss=False,
     ):
@@ -507,7 +507,7 @@ class VQVAE(nn.Module):
         self.post_quant_conv = (
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
-        self.discriminator = Discriminator(in_dim)
+        self.discriminator = Discriminator(discriminator_shape)
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
         self.discriminator_loss_fn = (
