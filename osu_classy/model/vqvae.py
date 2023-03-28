@@ -371,7 +371,7 @@ class Discriminator(nn.Module):
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv1d(channels, dims[0], 7, padding=3),
+                    nn.Conv1d(channels, dims[0], 4, stride=2, padding=1),
                     nn.SiLU(),
                 ),
             ]
@@ -380,7 +380,7 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    nn.Conv1d(in_dim, out_dim, 7, padding=3),
+                    nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1),
                     nn.SiLU(),
                 )
             )
@@ -393,9 +393,15 @@ class Discriminator(nn.Module):
         )
 
     def forward(self, x):
+        # Do calculation in fp32
+        x = x.to(torch.float32)
         for layer in self.layers:
             x = layer(x)
-        return self.to_logits(x)
+
+        x = self.to_logits(x)
+
+        # Return logits in fp16
+        return x.to(torch.float16)
 
 
 class VQVAE(nn.Module):
