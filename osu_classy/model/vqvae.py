@@ -368,11 +368,7 @@ class Decoder(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(
-        self,
-        in_dim,
-        h_dims,
-    ):
+    def __init__(self, in_dim, h_dims):
         super().__init__()
         dim_pairs = list(zip(h_dims[:-1], h_dims[1:]))
         self.layers = nn.ModuleList(
@@ -407,23 +403,25 @@ class Discriminator(nn.Module):
 
 
 class LinearDiscriminator(nn.Module):
-    def __init__(self, ch):
+    def __init__(self, in_dim, h_dims):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(ch, 512),
-            nn.SiLU(),
-            nn.Linear(512, 256),
-            nn.SiLU(),
-            nn.Linear(256, 128),
-            nn.SiLU(),
-            nn.Linear(128, 1),
-        )
+        layers = [nn.Linear(in_dim, 512), nn.SiLU()]
+
+        dim_pairs = list(zip(h_dims[:-1], h_dims[1:]))
+        for _in_dim, _out_dim in dim_pairs:
+            layers.append(nn.Linear(_in_dim, _out_dim))
+            layers.append(nn.SiLU())
+
+        self.layers = nn.Sequential(*layers)
+
+        dim = h_dims[-1]
+        self.to_logits = nn.Linear(dim, 1)
 
     def forward(self, x):
         # rearrange to (batch, seq_len, channels)
         x = rearrange(x, "b c l -> b l c")
         x = self.layers(x)
-        return x
+        return self.to_logits(x)
 
 
 class VQVAE(nn.Module):
@@ -486,15 +484,15 @@ class VQVAE(nn.Module):
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
 
-        if use_linear_discriminator:
-            self.discriminator = LinearDiscriminator(in_dim)
-        else:
-            layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
-            layer_dims = [h_dim * m for m in layer_mults]
-            self.discriminator = Discriminator(
-                in_dim,
-                layer_dims,
-            )
+        discriminator_block = (
+            LinearDiscriminator if use_linear_discriminator else Discriminator
+        )
+        layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
+        layer_dims = [h_dim * m for m in layer_mults]
+        self.discriminator = discriminator_block(
+            in_dim,
+            layer_dims,
+        )
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
         self.discriminator_loss_fn = (
