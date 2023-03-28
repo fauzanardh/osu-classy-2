@@ -36,6 +36,16 @@ def gradient_penalty(sig, output, weight=10):
     return weight * ((gradients.norm(2, dim=-1) - 1) ** 2).mean()
 
 
+def wgangp_discriminator_loss(fake, real):
+    return (
+        -torch.mean(real) + torch.mean(fake) + gradient_penalty(real, torch.mean(real))
+    )
+
+
+def wgangp_generator_loss(fake):
+    return -torch.mean(fake)
+
+
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -360,48 +370,62 @@ class Decoder(nn.Module):
         return torch.tanh(x)
 
 
+# class Discriminator(nn.Module):
+#     def __init__(
+#         self,
+#         dims,
+#         channels=8,
+#     ):
+#         super().__init__()
+#         dim_pairs = list(zip(dims[:-1], dims[1:]))
+#         self.layers = nn.ModuleList(
+#             [
+#                 nn.Sequential(
+#                     PreNorm(channels, nn.Conv1d(channels, dims[0], 7, padding=3)),
+#                     nn.SiLU(),
+#                 ),
+#             ]
+#         )
+
+#         for in_dim, out_dim in dim_pairs:
+#             self.layers.append(
+#                 nn.Sequential(
+#                     PreNorm(in_dim, nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1)),
+#                     nn.SiLU(),
+#                 )
+#             )
+
+#         dim = dims[-1]
+#         self.to_logits = nn.Sequential(
+#             nn.Conv1d(dim, dim, 1),
+#             nn.SiLU(),
+#             nn.Conv1d(dim, 1, 4),
+#         )
+
+#     def forward(self, x):
+#         # Do calculation in fp32
+#         x = x.to(torch.float32)
+#         for layer in self.layers:
+#             x = layer(x)
+
+#         x = self.to_logits(x)
+
+#         # Return logits in fp16
+#         return x.to(torch.float16)
+
+
 class Discriminator(nn.Module):
-    def __init__(
-        self,
-        dims,
-        channels=8,
-    ):
+    def __init__(self, ch):
         super().__init__()
-        dim_pairs = list(zip(dims[:-1], dims[1:]))
-        self.layers = nn.ModuleList(
-            [
-                nn.Sequential(
-                    PreNorm(channels, nn.Conv1d(channels, dims[0], 7, padding=3)),
-                    nn.SiLU(),
-                ),
-            ]
-        )
-
-        for in_dim, out_dim in dim_pairs:
-            self.layers.append(
-                nn.Sequential(
-                    PreNorm(in_dim, nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1)),
-                    nn.SiLU(),
-                )
-            )
-
-        dim = dims[-1]
-        self.to_logits = nn.Sequential(
-            nn.Conv1d(dim, dim, 1),
+        self.layers = nn.Sequential(
+            nn.Conv1d(ch, 512, 7, padding=3),
             nn.SiLU(),
-            nn.Conv1d(dim, 1, 4),
+            nn.Conv1d(512, 256, 7, padding=3),
+            nn.SiLU(),
+            nn.Conv1d(256, 128, 7, padding=3),
+            nn.SiLU(),
+            nn.Conv1d(128, 1, 7, padding=3),
         )
-
-    def forward(self, x):
-        # Do calculation in fp32
-        x = x.to(torch.float32)
-        for layer in self.layers:
-            x = layer(x)
-
-        x = self.to_logits(x)
-
-        # Return logits in fp16
-        return x.to(torch.float16)
 
 
 class VQVAE(nn.Module):
@@ -420,6 +444,7 @@ class VQVAE(nn.Module):
         attn_dim_head=64,
         commitment_weight=1.0,
         discriminator_layers=4,
+        use_wgangp_loss=False,
         use_l1_loss=False,
     ):
         super().__init__()
@@ -461,17 +486,15 @@ class VQVAE(nn.Module):
         self.post_quant_conv = (
             nn.Conv1d(emb_dim, z_dim, 1) if emb_dim != z_dim else nn.Identity()
         )
-
-        layer_mults = list(map(lambda x: 2**x, range(discriminator_layers)))
-        layer_dims = [h_dim * m for m in layer_mults]
-        self.discriminator = Discriminator(
-            layer_dims,
-            in_dim,
-        )
+        self.discriminator = Discriminator(in_dim)
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
-        self.discriminator_loss_fn = bce_discriminator_loss
-        self.generator_loss_fn = bce_generator_loss
+        self.discriminator_loss_fn = (
+            bce_discriminator_loss if use_wgangp_loss else wgangp_discriminator_loss
+        )
+        self.generator_loss_fn = (
+            bce_generator_loss if use_wgangp_loss else wgangp_generator_loss
+        )
 
     @property
     def codebook(self):
@@ -498,7 +521,6 @@ class VQVAE(nn.Module):
         return_loss=False,
         return_disc_loss=False,
         return_recons=False,
-        add_gradient_penalty=True,
     ):
         fmap, _, commit_loss = self.encode(sig)
         fmap = self.decode(fmap)
@@ -511,11 +533,7 @@ class VQVAE(nn.Module):
             sig.requires_grad_()
 
             fmap_disc_logits, sig_disc_logits = map(self.discriminator, (fmap, sig))
-            disc_loss = self.discriminator_loss_fn(fmap_disc_logits, sig_disc_logits)
-
-            if add_gradient_penalty:
-                gp = gradient_penalty(sig, sig_disc_logits)
-                loss = disc_loss + gp
+            loss = self.discriminator_loss_fn(fmap_disc_logits, sig_disc_logits)
 
             if return_recons:
                 return loss, fmap
