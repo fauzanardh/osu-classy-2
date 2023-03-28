@@ -365,6 +365,7 @@ class Discriminator(nn.Module):
         self,
         dims,
         channels=8,
+        num_res_blocks=3,
     ):
         super().__init__()
         dim_pairs = list(zip(dims[:-1], dims[1:]))
@@ -380,7 +381,16 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    Downsample(in_dim, out_dim),
+                    nn.Sequential(
+                        *[
+                            ResnetBlock(
+                                in_dim if i == 0 else out_dim,
+                                out_dim
+                            )
+                            for i in range(num_res_blocks)
+                        ]
+                    ),
+                    Downsample(out_dim),
                     nn.SiLU(),
                 )
             )
