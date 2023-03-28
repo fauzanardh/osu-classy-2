@@ -284,7 +284,6 @@ class Decoder(nn.Module):
         num_res_blocks=3,
         attn_heads=16,
         attn_dim_head=64,
-        ff_mult=4,
     ):
         super().__init__()
 
