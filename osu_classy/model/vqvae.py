@@ -10,7 +10,7 @@ def l2norm(t):
     return F.normalize(t, dim=-1)
 
 
-def log(t, eps=1e-10):
+def log(t, eps=1e-4):
     return torch.log(t + eps)
 
 
