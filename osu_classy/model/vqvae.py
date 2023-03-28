@@ -430,6 +430,7 @@ class VQVAE(nn.Module):
         attn_dim_head=64,
         commitment_weight=1.0,
         discriminator_layers=4,
+        discriminator_res_blocks=3,
         use_l1_loss=False,
     ):
         super().__init__()
@@ -477,6 +478,7 @@ class VQVAE(nn.Module):
         self.discriminator = Discriminator(
             layer_dims,
             in_dim,
+            num_res_blocks=discriminator_res_blocks,
         )
 
         self.recon_loss_fn = F.l1_loss if use_l1_loss else F.mse_loss
