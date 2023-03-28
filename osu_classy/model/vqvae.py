@@ -371,7 +371,7 @@ class Discriminator(nn.Module):
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    Residual(nn.Conv1d(channels, dims[0], 7, padding=3)),
+                    PreNorm(channels, nn.Conv1d(channels, dims[0], 7, padding=3)),
                     nn.SiLU(),
                 ),
             ]
@@ -380,7 +380,7 @@ class Discriminator(nn.Module):
         for in_dim, out_dim in dim_pairs:
             self.layers.append(
                 nn.Sequential(
-                    Residual(nn.Conv1d(channels, dims[0], 4, stride=2, padding=1)),
+                    PreNorm(in_dim, nn.Conv1d(in_dim, out_dim, 4, stride=2, padding=1)),
                     nn.SiLU(),
                 )
             )
