@@ -67,12 +67,8 @@ class Residual(nn.Module):
 class Upsample(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
-        # self.conv = torch.nn.ConvTranspose1d(
-        #     in_channels, in_channels, 4, stride=2, padding=1
-        # )
-        self.conv = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="linear"),
-            nn.Conv1d(in_channels, in_channels, 7, padding=6, dilation=2),
+        self.conv = torch.nn.ConvTranspose1d(
+            in_channels, in_channels, 4, stride=2, padding=1
         )
 
     def forward(self, x):
@@ -83,10 +79,7 @@ class Upsample(nn.Module):
 class Downsample(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
-        # self.conv = torch.nn.Conv1d(
-        #     in_channels, in_channels, 4, stride=2, padding=1, padding_mode="reflect"
-        # )
-        self.conv = nn.Conv1d(in_channels, in_channels, 7, stride=2, padding=6, dilation=2)
+        self.conv = torch.nn.Conv1d(in_channels, in_channels, 4, stride=2, padding=1)
 
     def forward(self, x):
         x = self.conv(x)
