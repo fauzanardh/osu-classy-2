@@ -86,10 +86,7 @@ class Downsample(nn.Module):
         # self.conv = torch.nn.Conv1d(
         #     in_channels, in_channels, 4, stride=2, padding=1, padding_mode="reflect"
         # )
-        self.conv = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, 7, padding=6, dilation=2),
-            nn.MaxPool1d(2, 2),
-        )
+        self.conv = nn.Conv1d(in_channels, in_channels, 7, stride=2, padding=6, dilation=2)
 
     def forward(self, x):
         x = self.conv(x)
